@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zero-copy-pii-proxy
+  labels:
+    app: zero-copy-pii-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zero-copy-pii-proxy
+  template:
+    metadata:
+      labels:
+        app: zero-copy-pii-proxy
+    spec:
+      containers:
+        - name: proxy
+          image: yourregistry/zero_copy_pii_proxy:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 2
+            periodSeconds: 5

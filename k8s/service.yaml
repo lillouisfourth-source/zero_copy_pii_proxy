@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: zero-copy-pii-proxy
+  labels:
+    app: zero-copy-pii-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: zero-copy-pii-proxy
+  ports:
+    - protocol: TCP
+      port: 3000
+      targetPort: 3000
