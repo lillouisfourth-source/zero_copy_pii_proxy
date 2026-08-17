@@ -1,31 +1,20 @@
 ﻿import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
 
 export const options = {
-  vus: 100,
-  duration: '30s',
+  vus: 50,
+  duration: '10s',
+  thresholds: {
+    http_req_duration: ['p(95)<50'],
+  },
 };
 
 export default function () {
-  const url = 'http://localhost:8080/v1/chat/completions';
-  const payload = JSON.stringify({
-    model: 'gpt-4',
-    messages: [{ role: 'user', content: 'Explain quantum computing in detail.' }],
-    stream: true,
-  });
+  const payload = JSON.stringify({ text: "Hello, please contact me at enterprise-buyer@example.com or call 555-0199." });
+  const params = { headers: { 'Content-Type': 'application/json' } };
+  const res = http.post('http://127.0.0.1:8080/stream', payload, params);
 
-  const params = {
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer test_key', 
-    },
-  };
-
-  const res = http.post(url, payload, params);
-  
   check(res, {
     'is status 200': (r) => r.status === 200,
   });
-  
-  sleep(1);
 }

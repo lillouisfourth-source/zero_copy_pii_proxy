@@ -1,0 +1,23 @@
+﻿name: Performance Benchmark
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Start Infrastructure (Proxy + Upstream)
+        run: |
+          docker-compose up --build -d
+          sleep 5
+
+      - name: Run k6 Load Test
+        run: |
+          docker run --rm --network host -i grafana/k6 run - < load_test.js
