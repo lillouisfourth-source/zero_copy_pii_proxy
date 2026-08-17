@@ -18,7 +18,7 @@ RUN rustup target add x86_64-unknown-linux-musl \
     && cargo build --release --workspace --target x86_64-unknown-linux-musl
 
 # Stage 2: runtime
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM cgr.dev/chainguard/static:latest
 
 # Copy the statically linked binary from the builder stage
 COPY --from=builder /usr/src/app/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy /usr/local/bin/zero_copy_pii_proxy
