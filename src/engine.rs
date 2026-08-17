@@ -17,14 +17,21 @@ impl PiiVault {
     /// Create a new vault from patterns and corresponding replacements.
     /// patterns.len() must equal replacements.len().
     pub fn new(patterns: &[&str], replacements: &[&str]) -> Self {
-        assert_eq!(patterns.len(), replacements.len(), "patterns and replacements length mismatch");
+        assert_eq!(
+            patterns.len(),
+            replacements.len(),
+            "patterns and replacements length mismatch"
+        );
         let searcher = AhoCorasick::new(patterns).expect("failed to build aho-corasick automaton");
 
         // compute maximum pattern length in bytes
         let max_pattern_len = patterns.iter().map(|p| p.len()).max().unwrap_or(0);
 
         // copy replacements into owned Strings
-        let replacements_vec = replacements.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let replacements_vec = replacements
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
 
         // compute JSON-escaped versions of replacements (without surrounding quotes)
         let escaped_replacements_vec = replacements

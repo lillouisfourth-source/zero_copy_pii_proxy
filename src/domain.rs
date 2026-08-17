@@ -141,7 +141,9 @@ pub struct StreamState {
 
 impl StreamState {
     pub fn new() -> Self {
-        Self { choices: Vec::new() }
+        Self {
+            choices: Vec::new(),
+        }
     }
 
     /// Ensure a ChoiceState exists at `index` and return a mutable reference to it.

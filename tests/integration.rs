@@ -1,11 +1,11 @@
-﻿use std::sync::Arc;
-use tokio::time::{sleep, Duration};
 use futures::StreamExt;
-use reqwest::Client;
 use metrics_exporter_prometheus::PrometheusBuilder;
-use zero_copy_pii_proxy::make_router;
-use zero_copy_pii_proxy::engine::PiiVault;
+use reqwest::Client;
+use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::time::{sleep, Duration};
+use zero_copy_pii_proxy::engine::PiiVault;
+use zero_copy_pii_proxy::make_router;
 
 #[tokio::test]
 async fn drop_guard_prevents_leak_of_active_sse_streams() {
@@ -39,7 +39,12 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
     // Build and spawn the proxy app pointing to the upstream server
     let api_key = "test_key".to_string();
     let upstream_url = format!("http://{}", upstream_addr);
-    let router = make_router(vault.clone(), prometheus_handle.clone(), api_key.clone(), upstream_url.clone());
+    let router = make_router(
+        vault.clone(),
+        prometheus_handle.clone(),
+        api_key.clone(),
+        upstream_url.clone(),
+    );
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
@@ -52,7 +57,8 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
     let proxy_url = format!("http://{}/v1/chat/completions", proxy_addr);
     let body = serde_json::json!({"model": "gpt-test", "messages": [{"role":"user","content":"hello"}], "stream": true});
 
-    let resp = client.post(&proxy_url)
+    let resp = client
+        .post(&proxy_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&body)
         .send()
@@ -71,6 +77,17 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
     sleep(Duration::from_millis(50)).await;
 
     // Now poll /metrics and assert active_sse_streams 0
-    let metrics = client.get(format!("http://{}/metrics", proxy_addr)).send().await.expect("metrics").text().await.expect("text");
-    assert!(metrics.contains("active_sse_streams 0"), "metrics did not show zero active streams: {}", metrics);
+    let metrics = client
+        .get(format!("http://{}/metrics", proxy_addr))
+        .send()
+        .await
+        .expect("metrics")
+        .text()
+        .await
+        .expect("text");
+    assert!(
+        metrics.contains("active_sse_streams 0"),
+        "metrics did not show zero active streams: {}",
+        metrics
+    );
 }
