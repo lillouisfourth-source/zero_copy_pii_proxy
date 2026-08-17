@@ -15,11 +15,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Build Docker Image
+        run: docker build -t zero-copy-pii-proxy:${{ github.sha }} .
+
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.28.0
         with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          ignore-unfixed: true
+          image-ref: 'zero-copy-pii-proxy:${{ github.sha }}'
           format: 'table'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
