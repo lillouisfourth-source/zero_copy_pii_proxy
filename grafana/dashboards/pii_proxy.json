@@ -1,0 +1,19 @@
+{
+  "title": "PII Proxy Metrics",
+  "timezone": "browser",
+  "refresh": "5s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Active SSE Streams",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "targets": [ { "expr": "active_sse_streams", "refId": "A" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP Requests Rate (1m)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "targets": [ { "expr": "rate(http_requests_total[1m])", "refId": "A" } ]
+    }
+  ]
+}
