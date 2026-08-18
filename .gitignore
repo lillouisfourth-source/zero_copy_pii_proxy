@@ -21,3 +21,8 @@ security_logs_extracted/
 *.db
 *.p12
 *.pfx
+
+# Demo script dependencies
+examples/node_modules/
+examples/package.json
+examples/package-lock.json
