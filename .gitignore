@@ -2,3 +2,22 @@
 /target
 target/
 
+# Local build / artifacts
+security_logs_extracted/
+*.log
+# IDE/editor folders
+.vscode/
+.idea/
+# Binary / debug / compiled artifacts
+*.pdb
+*.rlib
+*.exe
+*.dll
+*.lib
+*.a
+*.so
+# Databases & keystores
+*.sqlite
+*.db
+*.p12
+*.pfx
