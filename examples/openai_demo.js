@@ -2,7 +2,7 @@ const OpenAI = require('openai');
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || 'sk-mock-proxy-key',
-  baseURL: 'https://zero-copy-pii-proxy.fly.dev/v1',
+  baseURL: process.env.PROXY_BASE_URL || 'https://zero-copy-pii-proxy.fly.dev/v1',
   defaultHeaders: {
     'x-proxy-key': process.env.PROXY_API_KEY,
   },

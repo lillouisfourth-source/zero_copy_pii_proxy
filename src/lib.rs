@@ -115,7 +115,7 @@ async fn cors_middleware(req: Request<Body>, next: Next) -> Result<Response<Body
 
 pub async fn proxy_with_upstream(
     req: Request<Body>,
-    _vault: Arc<PiiVault>,
+    vault: Arc<PiiVault>,
     upstream_base: String,
 ) -> Response<Body> {
     // increment metrics for active SSE streams; spawn background task to forward upstream stream
@@ -145,7 +145,8 @@ pub async fn proxy_with_upstream(
     let (tx, rx) = unbounded_channel::<Result<Bytes, Infallible>>();
     let tx_task = tx.clone();
 
-    // Spawn task to send request upstream and pipe bytes back
+    // Spawn task to send request upstream and pipe bytes back (apply redaction per-chunk)
+    let vault_task = vault.clone();
     tokio::spawn(async move {
         struct ActiveStreamGuard;
         impl Drop for ActiveStreamGuard {
@@ -168,7 +169,11 @@ pub async fn proxy_with_upstream(
                 while let Some(item) = stream.next().await {
                     match item {
                         Ok(chunk) => {
-                            if tx_task.send(Ok(chunk)).is_err() {
+                            // Convert chunk bytes to text (lossy to be robust), redact using the vault, and forward the redacted bytes.
+                            let text = String::from_utf8_lossy(&chunk).to_string();
+                            let redacted_cow = crate::engine::redact_text(&text, &vault_task);
+                            let redacted = redacted_cow.into_owned();
+                            if tx_task.send(Ok(Bytes::from(redacted))).is_err() {
                                 tracing::info!("downstream disconnected, stopping forward");
                                 return;
                             }
