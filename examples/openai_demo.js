@@ -2,7 +2,7 @@
 
 const client = new OpenAI({
   apiKey: 'sk-mock-proxy-key',
-  baseURL: 'http://127.0.0.1:8080/v1',
+  baseURL: 'https://zero-copy-pii-proxy.fly.dev/v1',
 });
 
 const response = await client.chat.completions.create({
