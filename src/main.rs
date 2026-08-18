@@ -61,7 +61,7 @@ async fn main() {
         vault.clone(),
         prometheus_handle.clone(),
         api_key.clone(),
-        upstream_url.clone(),
+        upstream_base.clone(),
     );
 
     // Bind to 0.0.0.0 so Docker/K8s can route to it

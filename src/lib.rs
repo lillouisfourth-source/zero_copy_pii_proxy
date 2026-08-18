@@ -114,7 +114,7 @@ async fn cors_middleware(req: Request<Body>, next: Next) -> Result<Response<Body
 }
 
 pub async fn proxy_with_upstream(
-    mut req: Request<Body>,
+    req: Request<Body>,
     _vault: Arc<PiiVault>,
     upstream_base: String,
 ) -> Response<Body> {
@@ -122,7 +122,15 @@ pub async fn proxy_with_upstream(
     metrics::increment_counter!("proxy_requests_total");
     metrics::increment_gauge!("active_sse_streams", 1.0);
 
-    // Read incoming body fully (limit 10 MB)
+    // Capture request path & query BEFORE consuming the request body.
+    // This avoids moving `req` early and then attempting to use it later.
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+
+            // Read incoming body fully (limit 10 MB)
     let whole = match axum::body::to_bytes(req.into_body(), 10_485_760).await {
         Ok(b) => b,
         Err(_) => {
@@ -150,7 +158,6 @@ pub async fn proxy_with_upstream(
         let client = Client::new();
         // Build target URL by safely joining the upstream base and the original request path+query
         let base = upstream_base.trim_end_matches('/');
-        let path_and_query = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
         let target = format!("{}{}", base, path_and_query);
         // No auth forwarded here in this simplified path
         let builder = client.post(&target).body(whole);
