@@ -27,8 +27,8 @@ async fn main() {
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(3000u16);
-    let upstream_url = std::env::var("UPSTREAM_API_URL")
-        .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
+    let upstream_base = std::env::var("UPSTREAM_BASE_URL")
+        .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
 
     // Parse PII_PATTERNS into a Vec<String> and prepare replacements
     let patterns_env =

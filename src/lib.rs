@@ -30,7 +30,7 @@ pub fn make_router(
     vault: Arc<PiiVault>,
     prometheus_handle: Arc<PrometheusHandle>,
     api_key: String,
-    upstream_url: String,
+    upstream_base: String,
 ) -> Router {
     let ph = prometheus_handle.clone();
 
@@ -39,8 +39,8 @@ pub fn make_router(
             "/v1/chat/completions",
             post(move |req| {
                 let vault = vault.clone();
-                let upstream = upstream_url.clone();
-                async move { proxy_with_upstream(req, vault, upstream).await }
+                let upstream_base = upstream_base.clone();
+                async move { proxy_with_upstream(req, vault, upstream_base).await }
             })
             .layer(middleware::from_fn_with_state(
                 api_key.clone(),
@@ -114,9 +114,9 @@ async fn cors_middleware(req: Request<Body>, next: Next) -> Result<Response<Body
 }
 
 pub async fn proxy_with_upstream(
-    req: Request<Body>,
+    mut req: Request<Body>,
     _vault: Arc<PiiVault>,
-    upstream_url: String,
+    upstream_base: String,
 ) -> Response<Body> {
     // increment metrics for active SSE streams; spawn background task to forward upstream stream
     metrics::increment_counter!("proxy_requests_total");
@@ -148,8 +148,12 @@ pub async fn proxy_with_upstream(
         let _guard = ActiveStreamGuard;
 
         let client = Client::new();
-        let builder = client.post(&upstream_url).body(whole);
+        // Build target URL by safely joining the upstream base and the original request path+query
+        let base = upstream_base.trim_end_matches('/');
+        let path_and_query = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+        let target = format!("{}{}", base, path_and_query);
         // No auth forwarded here in this simplified path
+        let builder = client.post(&target).body(whole);
 
         match tokio::time::timeout(Duration::from_secs(120), builder.send()).await {
             Ok(Ok(resp)) => {
