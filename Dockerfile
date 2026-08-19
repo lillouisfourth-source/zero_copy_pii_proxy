@@ -8,7 +8,6 @@ WORKDIR /usr/src/app
 
 # Copy manifests first to leverage Docker layer caching
 COPY Cargo.toml Cargo.lock ./
-COPY .cargo ./ .cargo
 
 # Copy the rest of the source
 COPY . .
