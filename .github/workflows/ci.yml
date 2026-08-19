@@ -15,8 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-         with:
-           fetch-depth: 0
+        with:
+          fetch-depth: 0
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -34,8 +34,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-         with:
-           fetch-depth: 0
+        with:
+          fetch-depth: 0
       - name: Build Docker Image
         run: docker build -t zero-copy-pii-proxy:test .
+      - name: Upload security artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-artifacts
+          path: |
+            trivy-results.sarif
+            sbom.json
+          if-no-files-found: warn
 
