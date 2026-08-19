@@ -1,9 +1,10 @@
 ﻿import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
 
 export const options = {
   vus: 100,
   duration: '30s',
+  maxDuration: '30m',
 };
 
 export default function () {
@@ -27,5 +28,4 @@ export default function () {
     'is status 200': (r) => r.status === 200,
   });
   
-  sleep(1);
 }
