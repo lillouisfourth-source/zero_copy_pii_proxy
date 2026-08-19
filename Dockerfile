@@ -1,5 +1,5 @@
 # Stage 1: builder
-FROM rust:1.85-alpine AS builder
+FROM rust:1.88-alpine AS builder
 
 # Install packages needed for musl static linking
 RUN apk add --no-cache musl-dev build-base curl git
