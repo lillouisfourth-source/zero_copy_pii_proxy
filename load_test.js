@@ -7,7 +7,7 @@ export const options = {
 };
 
 export default function () {
-  const url = 'http://localhost:8080/v1/chat/completions';
+  const url = 'http://localhost:3000/v1/chat/completions';
   const payload = JSON.stringify({
     model: 'gpt-4',
     messages: [{ role: 'user', content: 'Explain quantum computing in detail.' }],
