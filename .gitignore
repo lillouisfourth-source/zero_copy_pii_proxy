@@ -26,3 +26,7 @@ security_logs_extracted/
 examples/node_modules/
 examples/package.json
 examples/package-lock.json
+node_modules/
+*.zip
+trivy_bin/
+syft_bin/

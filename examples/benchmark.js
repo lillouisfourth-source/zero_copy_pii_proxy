@@ -19,7 +19,7 @@ const instance = autocannon({
   pipelining: 1,
   headers: {
     'content-type': 'application/json',
-    'authorization': `Bearer ${process.env.OPENAI_API_KEY || 'test-proxy-key'}`,
+    'authorization': 'Bearer ' + (process.env.OPENAI_API_KEY || 'test-proxy-key'),
     'x-proxy-key': PROXY_KEY,
   },
   method: 'POST',
@@ -46,3 +46,4 @@ function finished(err, res) {
 process.on('SIGINT', function() {
   instance.stop();
 });
+
