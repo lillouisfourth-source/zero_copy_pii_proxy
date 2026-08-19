@@ -1,5 +1,7 @@
 use aho_corasick::AhoCorasick;
+use bytes::{Bytes, BytesMut};
 use serde_json;
+use std::str::Utf8Error;
 
 /// PiiVault holds the Aho-Corasick searcher and replacement arrays.
 /// replacements: standard text replacements
@@ -9,8 +11,85 @@ use serde_json;
 pub struct PiiVault {
     pub searcher: AhoCorasick,
     pub max_pattern_len: usize,
+    pub patterns: Vec<String>,
     pub replacements: Vec<String>,
     pub escaped_replacements: Vec<String>,
+}
+
+const DEFAULT_MAX_BUFFER_CAPACITY: usize = 64 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum StreamRedactionError {
+    BufferLimitExceeded,
+    InvalidUtf8,
+}
+
+pub struct StreamRedactor<'a> {
+    vault: &'a PiiVault,
+    buffer: BytesMut,
+    max_capacity: usize,
+}
+
+impl<'a> StreamRedactor<'a> {
+    pub fn new(vault: &'a PiiVault) -> Self {
+        Self::with_max_capacity(vault, DEFAULT_MAX_BUFFER_CAPACITY)
+    }
+
+    pub fn with_max_capacity(vault: &'a PiiVault, max_capacity: usize) -> Self {
+        Self {
+            vault,
+            buffer: BytesMut::with_capacity(max_capacity),
+            max_capacity,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Bytes>, StreamRedactionError> {
+        if chunk.len() > self.max_capacity
+            || self.buffer.len().saturating_add(chunk.len()) > self.max_capacity
+        {
+            return Err(StreamRedactionError::BufferLimitExceeded);
+        }
+        self.buffer.extend_from_slice(chunk);
+        self.flush_available(false)
+    }
+
+    pub fn finish(&mut self) -> Result<Vec<Bytes>, StreamRedactionError> {
+        if std::str::from_utf8(&self.buffer).is_err() {
+            return Err(StreamRedactionError::InvalidUtf8);
+        }
+        self.flush_available(true)
+    }
+
+    fn flush_available(&mut self, flush_all: bool) -> Result<Vec<Bytes>, StreamRedactionError> {
+        let valid_len = match std::str::from_utf8(&self.buffer) {
+            Ok(text) => text.len(),
+            Err(error) if error.error_len().is_none() => valid_utf8_prefix(error),
+            Err(_) => return Err(StreamRedactionError::InvalidUtf8),
+        };
+        if valid_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let text = std::str::from_utf8(&self.buffer[..valid_len])
+            .map_err(|_| StreamRedactionError::InvalidUtf8)?;
+        let (safe, _) = if flush_all {
+            (text, "")
+        } else {
+            determine_safe_boundary(text, self.vault)
+        };
+        if safe.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let output = redact_text(safe, self.vault).into_owned();
+        let consumed = safe.len();
+        let _ = self.buffer.split_to(consumed);
+        Ok(vec![Bytes::from(output)])
+    }
+}
+
+fn valid_utf8_prefix(error: Utf8Error) -> usize {
+    error.valid_up_to()
 }
 
 impl PiiVault {
@@ -51,6 +130,10 @@ impl PiiVault {
         Self {
             searcher,
             max_pattern_len,
+            patterns: patterns
+                .iter()
+                .map(|pattern| (*pattern).to_string())
+                .collect(),
             replacements: replacements_vec,
             escaped_replacements: escaped_replacements_vec,
         }
@@ -99,15 +182,21 @@ pub fn determine_safe_boundary<'a>(text: &'a str, vault: &PiiVault) -> (&'a str,
         return ("", text);
     }
 
-    // If there are no matches in this chunk, it's safe to flush entirely.
-    if vault.searcher.find(text).is_none() {
+    let text_bytes = text.as_bytes();
+    let mut partial_len = 0usize;
+    for pattern in &vault.patterns {
+        let max_prefix_len = pattern.len().min(text_bytes.len());
+        for prefix_len in 1..max_prefix_len {
+            if text_bytes.ends_with(&pattern.as_bytes()[..prefix_len]) {
+                partial_len = partial_len.max(prefix_len);
+            }
+        }
+    }
+    if partial_len == 0 {
         return (text, "");
     }
 
-    // Otherwise, hold the last (max_pattern_len - 1) bytes in the tail buffer to
-    // allow matches that cross chunk boundaries to be detected when the next chunk arrives.
-    let hold = vault.max_pattern_len - 1;
-    let mut split_at = text.len().saturating_sub(hold);
+    let mut split_at = text.len().saturating_sub(partial_len);
 
     // Walk backwards until we find a char boundary to avoid splitting multi-byte UTF-8 chars.
     while split_at > 0 && !text.is_char_boundary(split_at) {
@@ -125,7 +214,6 @@ pub fn determine_safe_boundary<'a>(text: &'a str, vault: &PiiVault) -> (&'a str,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ChoiceState;
 
     #[test]
     fn test_basic_redaction() {
@@ -140,16 +228,14 @@ mod tests {
         // and also include the shorter pattern "pass" which appears in the text.
         let vault = PiiVault::new(&["xxxxx", "pass"], &["[REDACTED]", "[REDACTED]"]);
         let (safe, tail) = determine_safe_boundary("my pass", &vault);
-        assert_eq!(safe, "my ");
-        assert_eq!(tail, "pass");
+        assert_eq!(safe, "my pass");
+        assert_eq!(tail, "");
     }
 
     #[test]
     fn test_utf8_char_boundary_panic_trap() {
-        // Pattern that is a 4-byte emoji ensures max_pattern_len == 4
-        let vault = PiiVault::new(&["🚀"], &["[REDACTED]"]);
+        let vault = PiiVault::new(&["🚀abc"], &["[REDACTED]"]);
         let text = "Hello 🚀";
-        // This call must not panic and must backtrack to a valid UTF-8 boundary
         let (safe, tail) = determine_safe_boundary(text, &vault);
         assert_eq!(safe, "Hello ");
         assert_eq!(tail, "🚀");
@@ -157,36 +243,16 @@ mod tests {
 
     #[test]
     fn test_cross_chunk_reconstruction_with_state() {
-        // Build a searcher that knows about "password", "pass" and "secret" but deliberately
-        // set max_pattern_len to 5 so that only the last 4 bytes ("pass") are held by
-        // determine_safe_boundary for the first chunk. This simulates holding a small
-        // fragment across chunk boundaries and then reconstructing the full sensitive word.
-        let searcher = AhoCorasick::new(&["password", "my", "secret"]).expect("build");
-        let replacements = vec![
-            "[REDACTED]".to_string(),
-            "[REDACTED]".to_string(),
-            "[REDACTED]".to_string(),
-        ];
-        let escaped_replacements = replacements.clone();
-        let vault = PiiVault {
-            searcher,
-            max_pattern_len: 5, // force hold of 4 bytes
-            replacements,
-            escaped_replacements,
-        };
-
-        let mut choice_state = ChoiceState::new(0);
-
-        // Chunk 1: should hold just "pass"
-        let chunk1 = "Here is my pass";
-        let (_safe1, tail1) = determine_safe_boundary(chunk1, &vault);
-        assert_eq!(tail1, "pass");
-        choice_state.append_to_content_tail(tail1);
-
-        // Chunk 2: prepend the held tail and redact the reconstructed text
-        let held = choice_state.take_content_tail();
-        let reconstructed = format!("{}{}", held, "word for the account");
-        let out = redact_text(&reconstructed, &vault);
-        assert_eq!(out, "[REDACTED] for the account");
+        let vault = PiiVault::new(&["password"], &["[REDACTED]"]);
+        let mut redactor = StreamRedactor::new(&vault);
+        let mut output = Vec::new();
+        output.extend(redactor.push(b"pass").unwrap());
+        output.extend(redactor.push(b"word").unwrap());
+        output.extend(redactor.finish().unwrap());
+        let output = output
+            .into_iter()
+            .flat_map(|chunk| chunk.to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(String::from_utf8(output).unwrap(), "[REDACTED]");
     }
 }

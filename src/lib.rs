@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use engine::PiiVault;
+use engine::{PiiVault, StreamRedactor};
 
 /// Build the axum Router used by main and tests. Exposed publicly for integration tests.
 pub fn make_router(
@@ -115,7 +115,7 @@ async fn cors_middleware(req: Request<Body>, next: Next) -> Result<Response<Body
 
 pub async fn proxy_with_upstream(
     req: Request<Body>,
-    _vault: Arc<PiiVault>,
+    vault: Arc<PiiVault>,
     upstream_url: String,
 ) -> Response<Body> {
     // increment metrics for active SSE streams; spawn background task to forward upstream stream
@@ -154,19 +154,39 @@ pub async fn proxy_with_upstream(
         match tokio::time::timeout(Duration::from_secs(120), builder.send()).await {
             Ok(Ok(resp)) => {
                 let mut stream = resp.bytes_stream();
+                let mut redactor = StreamRedactor::new(&vault);
                 while let Some(item) = stream.next().await {
                     match item {
-                        Ok(chunk) => {
-                            if tx_task.send(Ok(chunk)).is_err() {
-                                tracing::info!("downstream disconnected, stopping forward");
+                        Ok(chunk) => match redactor.push(&chunk) {
+                            Ok(outputs) => {
+                                for output in outputs {
+                                    if tx_task.send(Ok(output)).is_err() {
+                                        tracing::info!("downstream disconnected, stopping forward");
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!("upstream stream rejected: {:?}", error);
                                 return;
                             }
-                        }
+                        },
                         Err(e) => {
                             tracing::warn!("error reading upstream chunk: {}", e);
                             return;
                         }
                     }
+                }
+                match redactor.finish() {
+                    Ok(outputs) => {
+                        for output in outputs {
+                            if tx_task.send(Ok(output)).is_err() {
+                                tracing::info!("downstream disconnected, stopping forward");
+                                return;
+                            }
+                        }
+                    }
+                    Err(error) => tracing::warn!("upstream stream rejected at end: {:?}", error),
                 }
             }
             Ok(Err(e)) => tracing::error!("upstream request failed: {}", e),
