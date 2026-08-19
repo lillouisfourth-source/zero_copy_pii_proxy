@@ -2,9 +2,14 @@
 import { check } from 'k6';
 
 export const options = {
-  vus: 100,
-  duration: '30s',
-  maxDuration: '30m',
+  scenarios: {
+    default: {
+      executor: 'shared-iterations',
+      vus: 100,
+      iterations: 100000,
+      maxDuration: '30m',
+    },
+  },
 };
 
 export default function () {
