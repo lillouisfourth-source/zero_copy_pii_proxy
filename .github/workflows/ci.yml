@@ -39,6 +39,18 @@ jobs:
           fetch-depth: 0
       - name: Build Docker Image
         run: docker build -t zero-copy-pii-proxy:test .
+      - name: Scan Docker Image for Vulnerabilities
+        uses: aquasecurity/trivy-action@v0.74.0
+        with:
+          image-ref: 'zero-copy-pii-proxy:test'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      - name: Generate Docker Image SBOM
+        uses: aquasecurity/trivy-action@v0.74.0
+        with:
+          image-ref: 'zero-copy-pii-proxy:test'
+          format: 'cyclonedx'
+          output: 'sbom.json'
       - name: Upload security artifacts
         uses: actions/upload-artifact@v4
         with:
