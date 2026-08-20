@@ -21,9 +21,13 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use reqwest::Client;
 use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::Semaphore;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use engine::{PiiVault, StreamRedactor};
+
+const MAX_ACTIVE_UPSTREAM_STREAMS: usize = 1000;
+static UPSTREAM_STREAM_LIMIT: Semaphore = Semaphore::const_new(MAX_ACTIVE_UPSTREAM_STREAMS);
 
 /// Build the axum Router used by main and tests. Exposed publicly for integration tests.
 pub fn make_router(
@@ -146,6 +150,13 @@ pub async fn proxy_with_upstream(
             }
         }
         let _guard = ActiveStreamGuard;
+        let _stream_permit = match UPSTREAM_STREAM_LIMIT.acquire().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::error!("upstream stream semaphore closed");
+                return;
+            }
+        };
 
         let client = Client::new();
         let builder = client.post(&upstream_url).body(whole);
@@ -172,7 +183,7 @@ pub async fn proxy_with_upstream(
                             Ok(outputs) => {
                                 for output in outputs {
                                     if tx_task.send(Ok(output)).is_err() {
-                                        tracing::info!("downstream disconnected, stopping forward");
+                                        tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
                                         return;
                                     }
                                 }
@@ -192,7 +203,7 @@ pub async fn proxy_with_upstream(
                     Ok(outputs) => {
                         for output in outputs {
                             if tx_task.send(Ok(output)).is_err() {
-                                tracing::info!("downstream disconnected, stopping forward");
+                                tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
                                 return;
                             }
                         }
