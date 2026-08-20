@@ -155,7 +155,18 @@ pub async fn proxy_with_upstream(
             Ok(Ok(resp)) => {
                 let mut stream = resp.bytes_stream();
                 let mut redactor = StreamRedactor::new(&vault);
-                while let Some(item) = stream.next().await {
+                loop {
+                    let item =
+                        match tokio::time::timeout(Duration::from_secs(15), stream.next()).await {
+                            Ok(item) => item,
+                            Err(_) => {
+                                tracing::warn!("upstream stream idle timeout");
+                                return;
+                            }
+                        };
+                    let Some(item) = item else {
+                        break;
+                    };
                     match item {
                         Ok(chunk) => match redactor.push(&chunk) {
                             Ok(outputs) => {

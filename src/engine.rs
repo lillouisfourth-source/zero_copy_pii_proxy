@@ -44,13 +44,23 @@ impl<'a> StreamRedactor<'a> {
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Bytes>, StreamRedactionError> {
-        if chunk.len() > self.max_capacity
-            || self.buffer.len().saturating_add(chunk.len()) > self.max_capacity
-        {
-            return Err(StreamRedactionError::BufferLimitExceeded);
+        let mut output = Vec::new();
+        let mut remaining = chunk;
+        while !remaining.is_empty() {
+            let available = self.max_capacity.saturating_sub(self.buffer.len());
+            if available == 0 {
+                output.extend(self.flush_available(false)?);
+                if self.buffer.len() >= self.max_capacity {
+                    return Err(StreamRedactionError::BufferLimitExceeded);
+                }
+                continue;
+            }
+            let take = remaining.len().min(available);
+            self.buffer.extend_from_slice(&remaining[..take]);
+            remaining = &remaining[take..];
+            output.extend(self.flush_available(false)?);
         }
-        self.buffer.extend_from_slice(chunk);
-        self.flush_available(false)
+        Ok(output)
     }
 
     pub fn finish(&mut self) -> Result<Vec<Bytes>, StreamRedactionError> {
