@@ -14,11 +14,10 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
-      - "9090:9090"
+      - "3000:3000"
     environment:
       - RUST_LOG=info
-      - UPSTREAM_URL=http://mock-upstream:8081
+      - UPSTREAM_API_URL=http://mock-upstream:8081
     depends_on:
       - mock-upstream
 
@@ -34,7 +33,7 @@ services:
   grafana:
     image: grafana/grafana:10.0.0
     ports:
-      - "3000:3000"
+      - "3001:3000"
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
     volumes:

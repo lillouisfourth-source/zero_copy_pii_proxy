@@ -29,6 +29,17 @@ async fn main() {
         .unwrap_or(3000u16);
     let upstream_url = std::env::var("UPSTREAM_API_URL")
         .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
+    let allowed_origins = std::env::var("ALLOWED_ORIGINS")
+        .ok()
+        .map(|origins| {
+            origins
+                .split(',')
+                .map(str::trim)
+                .filter(|origin| !origin.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Parse PII_PATTERNS into a Vec<String> and prepare replacements
     let patterns_env =
@@ -62,6 +73,7 @@ async fn main() {
         prometheus_handle.clone(),
         api_key.clone(),
         upstream_url.clone(),
+        allowed_origins,
     );
 
     // Bind to 0.0.0.0 so Docker/K8s can route to it

@@ -3,4 +3,4 @@ global:
 scrape_configs:
   - job_name: 'pii_proxy'
     static_configs:
-      - targets: ['proxy:9090']
+      - targets: ['proxy:3000']

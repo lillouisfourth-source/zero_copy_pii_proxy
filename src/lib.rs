@@ -20,14 +20,21 @@ use futures::StreamExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use reqwest::Client;
 use std::time::Duration;
-use tokio::sync::mpsc::unbounded_channel;
+use subtle::ConstantTimeEq;
+use tokio::sync::mpsc::channel;
 use tokio::sync::Semaphore;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 
 use engine::{PiiVault, StreamRedactor};
 
 const MAX_ACTIVE_UPSTREAM_STREAMS: usize = 1000;
 static UPSTREAM_STREAM_LIMIT: Semaphore = Semaphore::const_new(MAX_ACTIVE_UPSTREAM_STREAMS);
+
+#[derive(Clone)]
+struct AppState {
+    api_key: String,
+    allowed_origins: Vec<String>,
+}
 
 /// Build the axum Router used by main and tests. Exposed publicly for integration tests.
 pub fn make_router(
@@ -35,8 +42,13 @@ pub fn make_router(
     prometheus_handle: Arc<PrometheusHandle>,
     api_key: String,
     upstream_url: String,
+    allowed_origins: Vec<String>,
 ) -> Router {
     let ph = prometheus_handle.clone();
+    let state = AppState {
+        api_key,
+        allowed_origins,
+    };
 
     Router::new()
         .route(
@@ -46,10 +58,7 @@ pub fn make_router(
                 let upstream = upstream_url.clone();
                 async move { proxy_with_upstream(req, vault, upstream).await }
             })
-            .layer(middleware::from_fn_with_state(
-                api_key.clone(),
-                require_auth,
-            )),
+            .layer(middleware::from_fn_with_state(state.clone(), require_auth)),
         )
         .route("/health", get(|| async { (StatusCode::OK, "ok") }))
         .route(
@@ -59,21 +68,24 @@ pub fn make_router(
                 async move { (StatusCode::OK, h.render()) }
             }),
         )
-        .with_state(api_key.clone())
+        .with_state(state.clone())
         // Global body limit to mitigate OOM/memory attacks (2 MiB)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
-        .layer(middleware::from_fn(cors_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            cors_middleware,
+        ))
 }
 
 async fn require_auth(
-    State(api_key): State<String>,
+    State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
 ) -> Result<Response<Body>, StatusCode> {
     if let Some(hv) = req.headers().get("authorization") {
         if let Ok(s) = hv.to_str() {
             if let Some(token) = s.strip_prefix("Bearer ") {
-                if token == api_key {
+                if token.as_bytes().ct_eq(state.api_key.as_bytes()).into() {
                     let resp = next.run(req).await;
                     return Ok(resp);
                 }
@@ -83,15 +95,37 @@ async fn require_auth(
     Err(StatusCode::UNAUTHORIZED)
 }
 
-// Global CORS middleware to handle OPTIONS preflight and add permissive CORS headers to all responses.
-async fn cors_middleware(req: Request<Body>, next: Next) -> Result<Response<Body>, StatusCode> {
+// CORS middleware permits only configured origins and rejects all origins when unset.
+async fn cors_middleware(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response<Body>, StatusCode> {
+    let origin = req
+        .headers()
+        .get("origin")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let allowed_origin = origin
+        .as_deref()
+        .filter(|value| state.allowed_origins.iter().any(|allowed| allowed == value))
+        .map(str::to_string);
+
+    if origin.is_some() && allowed_origin.is_none() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     if req.method() == Method::OPTIONS {
         let mut resp = Response::builder()
             .status(StatusCode::OK)
             .body(Body::empty())
             .unwrap();
         let headers = resp.headers_mut();
-        headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+        if let Some(origin) = allowed_origin.as_deref() {
+            if let Ok(value) = HeaderValue::from_str(origin) {
+                headers.insert("access-control-allow-origin", value);
+            }
+        }
         headers.insert(
             "access-control-allow-headers",
             HeaderValue::from_static("Authorization, Content-Type"),
@@ -105,7 +139,11 @@ async fn cors_middleware(req: Request<Body>, next: Next) -> Result<Response<Body
 
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
-    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    if let Some(origin) = allowed_origin.as_deref() {
+        if let Ok(value) = HeaderValue::from_str(origin) {
+            headers.insert("access-control-allow-origin", value);
+        }
+    }
     headers.insert(
         "access-control-allow-headers",
         HeaderValue::from_static("Authorization, Content-Type"),
@@ -138,7 +176,7 @@ pub async fn proxy_with_upstream(
     };
 
     // Prepare channel
-    let (tx, rx) = unbounded_channel::<Result<Bytes, Infallible>>();
+    let (tx, rx) = channel::<Result<Bytes, Infallible>>(32);
     let tx_task = tx.clone();
 
     // Spawn task to send request upstream and pipe bytes back
@@ -182,7 +220,7 @@ pub async fn proxy_with_upstream(
                         Ok(chunk) => match redactor.push(&chunk) {
                             Ok(outputs) => {
                                 for output in outputs {
-                                    if tx_task.send(Ok(output)).is_err() {
+                                    if tx_task.send(Ok(output)).await.is_err() {
                                         tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
                                         return;
                                     }
@@ -202,7 +240,7 @@ pub async fn proxy_with_upstream(
                 match redactor.finish() {
                     Ok(outputs) => {
                         for output in outputs {
-                            if tx_task.send(Ok(output)).is_err() {
+                            if tx_task.send(Ok(output)).await.is_err() {
                                 tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
                                 return;
                             }
@@ -219,7 +257,7 @@ pub async fn proxy_with_upstream(
     });
 
     drop(tx);
-    let body_stream = UnboundedReceiverStream::new(rx);
+    let body_stream = ReceiverStream::new(rx);
     Response::builder()
         .header("content-type", "text/event-stream")
         .body(Body::from_stream(body_stream))

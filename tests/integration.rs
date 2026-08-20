@@ -44,6 +44,7 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
         prometheus_handle.clone(),
         api_key.clone(),
         upstream_url.clone(),
+        Vec::new(),
     );
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

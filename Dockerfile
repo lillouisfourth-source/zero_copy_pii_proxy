@@ -23,6 +23,6 @@ FROM gcr.io/distroless/static-debian12:nonroot
 # Copy the statically linked binary from the builder stage
 COPY --from=builder /usr/src/app/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy /usr/local/bin/zero_copy_pii_proxy
 
-EXPOSE 8080 9090
+EXPOSE 3000
 
 ENTRYPOINT ["/usr/local/bin/zero_copy_pii_proxy"]

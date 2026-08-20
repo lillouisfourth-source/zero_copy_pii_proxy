@@ -18,6 +18,9 @@ spec:
         - name: proxy
           image: yourregistry/zero_copy_pii_proxy:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: UPSTREAM_API_URL
+              value: http://mock-upstream:8081
           ports:
             - containerPort: 3000
           resources:
