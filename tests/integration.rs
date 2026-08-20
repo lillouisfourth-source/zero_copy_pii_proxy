@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::time::{sleep, Duration};
 use zero_copy_pii_proxy::engine::PiiVault;
-use zero_copy_pii_proxy::make_router;
+use zero_copy_pii_proxy::{make_router, AppState};
 
 #[tokio::test]
 async fn drop_guard_prevents_leak_of_active_sse_streams() {
@@ -39,13 +39,18 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
     // Build and spawn the proxy app pointing to the upstream server
     let api_key = "test_key".to_string();
     let upstream_url = format!("http://{}", upstream_addr);
-    let router = make_router(
-        vault.clone(),
-        prometheus_handle.clone(),
-        api_key.clone(),
-        upstream_url.clone(),
-        Vec::new(),
-    );
+    let router = make_router(AppState {
+        client: Client::builder()
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .unwrap(),
+        vault,
+        api_key: api_key.clone(),
+        upstream_url,
+        allowed_origins: Vec::new(),
+        prometheus_handle,
+    });
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();

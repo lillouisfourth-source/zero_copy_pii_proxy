@@ -39,6 +39,36 @@ jobs:
           fetch-depth: 0
       - name: Build Docker Image
         run: docker build -t zero-copy-pii-proxy:test .
+      - name: Start k6 test target
+        shell: bash
+        run: |
+          docker network create pii-ci
+          docker run -d --name pii-ci-mock --network pii-ci \
+            -v "$GITHUB_WORKSPACE/mock_upstream.js:/app/mock_upstream.js:ro" \
+            node:20-alpine node /app/mock_upstream.js
+          docker run -d --name pii-ci-proxy --network pii-ci -p 3000:3000 \
+            -e PROXY_API_KEY=test_key \
+            -e UPSTREAM_API_URL=http://pii-ci-mock:8081 \
+            zero-copy-pii-proxy:test
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs pii-ci-proxy
+          exit 1
+      - name: Run k6 load test
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: tests/redteam/load_test.js
+      - name: Stop k6 test target
+        if: always()
+        shell: bash
+        run: |
+          docker logs pii-ci-proxy || true
+          docker rm -f pii-ci-proxy pii-ci-mock || true
+          docker network rm pii-ci || true
       - name: Scan Docker Image for Vulnerabilities
         uses: aquasecurity/trivy-action@v0.36.0
         with:

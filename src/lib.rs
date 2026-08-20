@@ -6,7 +6,7 @@ pub mod engine;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::{Body, BodyDataStream};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderValue, Method, Request, Response, StatusCode};
 use axum::middleware::Next;
@@ -31,34 +31,25 @@ const MAX_ACTIVE_UPSTREAM_STREAMS: usize = 1000;
 static UPSTREAM_STREAM_LIMIT: Semaphore = Semaphore::const_new(MAX_ACTIVE_UPSTREAM_STREAMS);
 
 #[derive(Clone)]
-struct AppState {
-    api_key: String,
-    allowed_origins: Vec<String>,
+pub struct AppState {
+    pub client: Client,
+    pub vault: Arc<PiiVault>,
+    pub api_key: String,
+    pub upstream_url: String,
+    pub allowed_origins: Vec<String>,
+    pub prometheus_handle: Arc<PrometheusHandle>,
 }
 
+pub const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
+
 /// Build the axum Router used by main and tests. Exposed publicly for integration tests.
-pub fn make_router(
-    vault: Arc<PiiVault>,
-    prometheus_handle: Arc<PrometheusHandle>,
-    api_key: String,
-    upstream_url: String,
-    allowed_origins: Vec<String>,
-) -> Router {
-    let ph = prometheus_handle.clone();
-    let state = AppState {
-        api_key,
-        allowed_origins,
-    };
+pub fn make_router(state: AppState) -> Router {
+    let ph = state.prometheus_handle.clone();
 
     Router::new()
         .route(
             "/v1/chat/completions",
-            post(move |req| {
-                let vault = vault.clone();
-                let upstream = upstream_url.clone();
-                async move { proxy_with_upstream(req, vault, upstream).await }
-            })
-            .layer(middleware::from_fn_with_state(state.clone(), require_auth)),
+            post(proxy_handler).layer(middleware::from_fn_with_state(state.clone(), require_auth)),
         )
         .route("/health", get(|| async { (StatusCode::OK, "ok") }))
         .route(
@@ -70,11 +61,15 @@ pub fn make_router(
         )
         .with_state(state.clone())
         // Global body limit to mitigate OOM/memory attacks (2 MiB)
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             cors_middleware,
         ))
+}
+
+async fn proxy_handler(State(state): State<AppState>, req: Request<Body>) -> Response<Body> {
+    proxy_with_upstream(req, state).await
 }
 
 async fn require_auth(
@@ -155,30 +150,17 @@ async fn cors_middleware(
     Ok(resp)
 }
 
-pub async fn proxy_with_upstream(
-    req: Request<Body>,
-    vault: Arc<PiiVault>,
-    upstream_url: String,
-) -> Response<Body> {
+pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Response<Body> {
     // increment metrics for active SSE streams; spawn background task to forward upstream stream
     metrics::increment_counter!("proxy_requests_total");
     metrics::increment_gauge!("active_sse_streams", 1.0);
-
-    // Read incoming body fully (limit 10 MB)
-    let whole = match axum::body::to_bytes(req.into_body(), 10_485_760).await {
-        Ok(b) => b,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from("failed to read body"))
-                .unwrap()
-        }
-    };
 
     // Prepare channel
     let (tx, rx) = channel::<Result<Bytes, Infallible>>(32);
     let tx_task = tx.clone();
 
+    let body_stream: BodyDataStream = req.into_body().into_data_stream();
+    let request_body = reqwest::Body::wrap_stream(body_stream);
     // Spawn task to send request upstream and pipe bytes back
     tokio::spawn(async move {
         struct ActiveStreamGuard;
@@ -196,14 +178,13 @@ pub async fn proxy_with_upstream(
             }
         };
 
-        let client = Client::new();
-        let builder = client.post(&upstream_url).body(whole);
+        let builder = state.client.post(&state.upstream_url).body(request_body);
         // No auth forwarded here in this simplified path
 
         match tokio::time::timeout(Duration::from_secs(120), builder.send()).await {
             Ok(Ok(resp)) => {
                 let mut stream = resp.bytes_stream();
-                let mut redactor = StreamRedactor::new(&vault);
+                let mut redactor = StreamRedactor::new(&state.vault);
                 loop {
                     let item =
                         match tokio::time::timeout(Duration::from_secs(15), stream.next()).await {

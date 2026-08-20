@@ -1,14 +1,16 @@
 #![deny(warnings)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use dotenvy::dotenv;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::ServiceBuilder;
 
+use reqwest::Client;
 use zero_copy_pii_proxy::engine::PiiVault;
-use zero_copy_pii_proxy::make_router;
+use zero_copy_pii_proxy::{make_router, AppState};
 
 #[tokio::main]
 async fn main() {
@@ -68,13 +70,19 @@ async fn main() {
     let api_key =
         std::env::var("PROXY_API_KEY").unwrap_or_else(|_| "change_me_in_production".to_string());
 
-    let app = make_router(
-        vault.clone(),
-        prometheus_handle.clone(),
-        api_key.clone(),
-        upstream_url.clone(),
+    let client = Client::builder()
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .expect("failed to build upstream HTTP client");
+    let app = make_router(AppState {
+        client,
+        vault,
+        api_key,
+        upstream_url,
         allowed_origins,
-    );
+        prometheus_handle,
+    });
 
     // Bind to 0.0.0.0 so Docker/K8s can route to it
     let bind_addr = format!("0.0.0.0:{}", proxy_port);
