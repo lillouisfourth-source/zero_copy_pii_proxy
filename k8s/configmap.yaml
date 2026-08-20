@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: zero-copy-pii-proxy-config
-data:
-  UPSTREAM_API_URL: https://api.openai.com/v1/chat/completions
-  ALLOWED_ORIGINS: https://app.example.com

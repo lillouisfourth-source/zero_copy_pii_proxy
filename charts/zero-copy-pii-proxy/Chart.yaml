@@ -1,0 +1,6 @@
+apiVersion: v2
+name: zero-copy-pii-proxy
+description: Helm chart for the Zero-Copy PII Proxy
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

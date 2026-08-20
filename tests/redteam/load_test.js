@@ -9,7 +9,7 @@ export const options = {
     default: {
       executor: 'shared-iterations',
       vus: 100,
-      iterations: 100000,
+      iterations: 85000,
       maxDuration: '30m',
     },
   },

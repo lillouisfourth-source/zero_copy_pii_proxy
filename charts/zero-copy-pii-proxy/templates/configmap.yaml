@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "zero-copy-pii-proxy.fullname" . }}-config
+  labels:
+    {{- include "zero-copy-pii-proxy.labels" . | nindent 4 }}
+data:
+  UPSTREAM_API_URL: {{ .Values.config.upstreamApiUrl | quote }}
+  ALLOWED_ORIGINS: {{ .Values.config.allowedOrigins | quote }}

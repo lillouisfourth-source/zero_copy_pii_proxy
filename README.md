@@ -73,7 +73,7 @@ Run the k6 load test to exercise 100 concurrent SSE streams for 30s:
 k6 run tests/redteam/load_test.js
 ```
 
-Open Prometheus at http://localhost:9091 and Grafana at http://localhost:3000 to monitor the metrics in real-time. Useful metrics:
+Open Prometheus at http://localhost:9091 and Grafana at http://localhost:3001 to monitor the metrics in real-time. Useful metrics:
 
 - `active_sse_streams` (gauge) — tracked by a drop guard to ensure streams are decremented on task completion/drop
 - `proxy_requests_total` (counter) — total proxied requests

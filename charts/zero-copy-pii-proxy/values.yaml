@@ -1,0 +1,33 @@
+replicaCount: 1
+
+image:
+  repository: yourregistry/zero_copy_pii_proxy
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 3000
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+
+config:
+  upstreamApiUrl: https://api.openai.com/v1/chat/completions
+  allowedOrigins: https://app.example.com
+
+secrets:
+  apiKey: replace-me

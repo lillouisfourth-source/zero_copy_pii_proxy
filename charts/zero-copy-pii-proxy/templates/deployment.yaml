@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "zero-copy-pii-proxy.fullname" . }}
+  labels:
+    {{- include "zero-copy-pii-proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "zero-copy-pii-proxy.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "zero-copy-pii-proxy.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: UPSTREAM_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-config
+                  key: UPSTREAM_API_URL
+            - name: ALLOWED_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-config
+                  key: ALLOWED_ORIGINS
+            - name: PROXY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
+                  key: PROXY_API_KEY
+          ports:
+            - name: http
+              containerPort: 3000
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}

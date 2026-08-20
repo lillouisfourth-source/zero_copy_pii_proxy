@@ -1,0 +1,43 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Proxy Requests / Second",
+      "type": "timeseries",
+      "targets": [{ "expr": "rate(proxy_requests_total[1m])", "legendFormat": "requests/s", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Active SSE Streams",
+      "type": "timeseries",
+      "targets": [{ "expr": "active_sse_streams", "legendFormat": "streams", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "PII Redactions",
+      "type": "timeseries",
+      "targets": [{ "expr": "rate(pii_redactions_total[1m])", "legendFormat": "redactions/s", "refId": "A" }]
+    }
+  ],
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["zero-copy", "pii", "proxy"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "Zero-Copy PII Proxy",
+  "uid": "zero-copy-proxy",
+  "version": 1
+}

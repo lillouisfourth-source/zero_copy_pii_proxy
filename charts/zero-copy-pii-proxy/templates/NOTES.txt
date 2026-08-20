@@ -1,0 +1,4 @@
+Zero-Copy PII Proxy deployed.
+
+Service: {{ include "zero-copy-pii-proxy.fullname" . }}
+Port: {{ .Values.service.port }}
