@@ -59,9 +59,11 @@ jobs:
           docker logs pii-ci-proxy
           exit 1
       - name: Run k6 load test
-        uses: grafana/k6-action@v0.3.1
-        with:
-          filename: tests/redteam/load_test.js
+        run: |
+          docker run --network pii-ci \
+            -v ${{ github.workspace }}:/scripts \
+            -e TARGET_URL=http://pii-ci-proxy:3000/v1/chat/completions \
+            grafana/k6:latest run /scripts/tests/redteam/load_test.js
       - name: Stop k6 test target
         if: always()
         shell: bash

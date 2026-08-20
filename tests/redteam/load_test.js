@@ -2,6 +2,9 @@
 import { check } from 'k6';
 
 export const options = {
+  thresholds: {
+    checks: ['rate == 1.0'],
+  },
   scenarios: {
     default: {
       executor: 'shared-iterations',
@@ -13,7 +16,7 @@ export const options = {
 };
 
 export default function () {
-  const url = 'http://localhost:3000/v1/chat/completions';
+  const url = __ENV.TARGET_URL || 'http://localhost:3000/v1/chat/completions';
   const payload = JSON.stringify({
     model: 'gpt-4',
     messages: [{ role: 'user', content: 'Explain quantum computing in detail.' }],
