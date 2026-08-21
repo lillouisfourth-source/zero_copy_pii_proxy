@@ -1,7 +1,7 @@
 version: '3.8'
 services:
   mock-upstream:
-    image: node:20-alpine
+    image: node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293
     working_dir: /app
     volumes:
       - ./mock_upstream.js:/app/mock_upstream.js
@@ -23,7 +23,7 @@ services:
       - mock-upstream
 
   prometheus:
-    image: prom/prometheus:v2.45.0
+    image: prom/prometheus:v2.45.0@sha256:9309deb7c981e8a94584d9ed689fd62f7ac4549d816fd3881550311cf056a237
     ports:
       - "9091:9090"
     volumes:
@@ -32,7 +32,7 @@ services:
       - proxy
 
   grafana:
-    image: grafana/grafana:10.0.0
+    image: grafana/grafana:10.0.0@sha256:4d5308c296c49ec57b6e73854b041c731edab19571f41fa1c588dbd7288eba38
     ports:
       - "3001:3000"
     environment:
