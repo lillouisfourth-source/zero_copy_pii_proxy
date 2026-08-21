@@ -1,7 +1,9 @@
 #![deny(warnings)]
 
+pub mod budget_queue;
 pub mod domain;
 pub mod engine;
+pub mod engine_v2;
 
 use std::convert::Infallible;
 use std::sync::Arc;
