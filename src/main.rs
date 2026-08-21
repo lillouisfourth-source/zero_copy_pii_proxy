@@ -66,9 +66,14 @@ async fn main() {
 
     let vault = Arc::new(PiiVault::new(&patterns_refs, &replacements_refs));
 
-    // Read API key once and keep in router state
-    let api_key =
-        std::env::var("PROXY_API_KEY").unwrap_or_else(|_| "change_me_in_production".to_string());
+    // Read API key once and fail closed when it is not configured.
+    let api_key = std::env::var("PROXY_API_KEY")
+        .ok()
+        .filter(|key| !key.is_empty())
+        .unwrap_or_else(|| {
+            tracing::error!("PROXY_API_KEY is missing or empty; refusing to start");
+            panic!("PROXY_API_KEY must be configured")
+        });
 
     let client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(90))

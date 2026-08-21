@@ -24,6 +24,11 @@ use subtle::ConstantTimeEq;
 use tokio::sync::mpsc::channel;
 use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::request_id::{
+    MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
+};
+use tower_http::trace::TraceLayer;
+use tracing::{info_span, Instrument, Span};
 
 use engine::{PiiVault, StreamRedactor};
 
@@ -45,6 +50,7 @@ pub const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
 /// Build the axum Router used by main and tests. Exposed publicly for integration tests.
 pub fn make_router(state: AppState) -> Router {
     let ph = state.prometheus_handle.clone();
+    let request_id_header = axum::http::HeaderName::from_static("x-request-id");
 
     Router::new()
         .route(
@@ -66,6 +72,18 @@ pub fn make_router(state: AppState) -> Router {
             state.clone(),
             cors_middleware,
         ))
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+                let request_id = request
+                    .extensions()
+                    .get::<RequestId>()
+                    .and_then(|id| id.header_value().to_str().ok())
+                    .unwrap_or("missing");
+                info_span!("http_request", request_id = %request_id)
+            }),
+        )
+        .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
+        .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
 }
 
 async fn proxy_handler(State(state): State<AppState>, req: Request<Body>) -> Response<Body> {
@@ -151,17 +169,77 @@ async fn cors_middleware(
 }
 
 pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Response<Body> {
-    // increment metrics for active SSE streams; spawn background task to forward upstream stream
+    // Count requests independently from streams; a stream exists only after upstream success.
     metrics::increment_counter!("proxy_requests_total");
-    metrics::increment_gauge!("active_sse_streams", 1.0);
-
-    // Prepare channel
-    let (tx, rx) = channel::<Result<Bytes, Infallible>>(32);
-    let tx_task = tx.clone();
+    let request_span = Span::current();
 
     let body_stream: BodyDataStream = req.into_body().into_data_stream();
     let request_body = reqwest::Body::wrap_stream(body_stream);
-    // Spawn task to send request upstream and pipe bytes back
+    let stream_permit = match UPSTREAM_STREAM_LIMIT.acquire().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            metrics::decrement_gauge!("active_sse_streams", 1.0);
+            tracing::error!("upstream stream semaphore closed");
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::empty())
+                .unwrap();
+        }
+    };
+
+    let upstream_response = match tokio::time::timeout(
+        Duration::from_secs(120),
+        state
+            .client
+            .post(&state.upstream_url)
+            .body(request_body)
+            .send(),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            metrics::increment_counter!("proxy_gateway_error_total");
+            tracing::error!(error = %error, "upstream request failed");
+            return Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::empty())
+                .unwrap();
+        }
+        Err(_) => {
+            metrics::increment_counter!("proxy_gateway_error_total");
+            tracing::warn!("upstream request timed out");
+            return Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::empty())
+                .unwrap();
+        }
+    };
+
+    if !upstream_response.status().is_success() {
+        let status = StatusCode::from_u16(upstream_response.status().as_u16())
+            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let retry_after = upstream_response.headers().get("retry-after").cloned();
+        let content_type = upstream_response.headers().get("content-type").cloned();
+        let body = upstream_response.bytes().await.unwrap_or_default();
+        let status_label = status.as_u16().to_string();
+        metrics::increment_counter!(
+            "upstream_error_total",
+            "status" => status_label
+        );
+        let mut response = Response::builder().status(status);
+        if let Some(value) = retry_after {
+            response = response.header("retry-after", value);
+        }
+        if let Some(value) = content_type {
+            response = response.header("content-type", value);
+        }
+        return response.body(Body::from(body)).unwrap();
+    }
+
+    metrics::increment_gauge!("active_sse_streams", 1.0);
+    let (tx, rx) = channel::<Result<Bytes, Infallible>>(32);
+    let tx_task = tx.clone();
     tokio::spawn(async move {
         struct ActiveStreamGuard;
         impl Drop for ActiveStreamGuard {
@@ -170,55 +248,22 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
             }
         }
         let _guard = ActiveStreamGuard;
-        let _stream_permit = match UPSTREAM_STREAM_LIMIT.acquire().await {
-            Ok(permit) => permit,
-            Err(_) => {
-                tracing::error!("upstream stream semaphore closed");
-                return;
-            }
-        };
-
-        let builder = state.client.post(&state.upstream_url).body(request_body);
-        // No auth forwarded here in this simplified path
-
-        match tokio::time::timeout(Duration::from_secs(120), builder.send()).await {
-            Ok(Ok(resp)) => {
-                let mut stream = resp.bytes_stream();
-                let mut redactor = StreamRedactor::new(&state.vault);
-                loop {
-                    let item =
-                        match tokio::time::timeout(Duration::from_secs(15), stream.next()).await {
-                            Ok(item) => item,
-                            Err(_) => {
-                                tracing::warn!("upstream stream idle timeout");
-                                return;
-                            }
-                        };
-                    let Some(item) = item else {
-                        break;
-                    };
-                    match item {
-                        Ok(chunk) => match redactor.push(&chunk) {
-                            Ok(outputs) => {
-                                for output in outputs {
-                                    if tx_task.send(Ok(output)).await.is_err() {
-                                        tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
-                                        return;
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                tracing::warn!("upstream stream rejected: {:?}", error);
-                                return;
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!("error reading upstream chunk: {}", e);
-                            return;
-                        }
-                    }
+        let _stream_permit = stream_permit;
+        let mut stream = upstream_response.bytes_stream();
+        let mut redactor = StreamRedactor::new(&state.vault);
+        loop {
+            let item = match tokio::time::timeout(Duration::from_secs(15), stream.next()).await {
+                Ok(item) => item,
+                Err(_) => {
+                    tracing::warn!("upstream stream idle timeout");
+                    return;
                 }
-                match redactor.finish() {
+            };
+            let Some(item) = item else {
+                break;
+            };
+            match item {
+                Ok(chunk) => match redactor.push(&chunk) {
                     Ok(outputs) => {
                         for output in outputs {
                             if tx_task.send(Ok(output)).await.is_err() {
@@ -227,15 +272,29 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                             }
                         }
                     }
-                    Err(error) => tracing::warn!("upstream stream rejected at end: {:?}", error),
+                    Err(error) => {
+                        tracing::warn!("upstream stream rejected: {:?}", error);
+                        return;
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(error = %error, "error reading upstream chunk");
+                    return;
                 }
             }
-            Ok(Err(e)) => tracing::error!("upstream request failed: {}", e),
-            Err(_) => tracing::warn!("upstream request timed out"),
         }
-
-        // dropping tx_task and _guard will decrement the gauge
-    });
+        match redactor.finish() {
+            Ok(outputs) => {
+                for output in outputs {
+                    if tx_task.send(Ok(output)).await.is_err() {
+                        tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
+                        return;
+                    }
+                }
+            }
+            Err(error) => tracing::warn!("upstream stream rejected at end: {:?}", error),
+        }
+    }.instrument(request_span));
 
     drop(tx);
     let body_stream = ReceiverStream::new(rx);
