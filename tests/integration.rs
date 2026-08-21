@@ -3,6 +3,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use reqwest::Client;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 use zero_copy_pii_proxy::engine::PiiVault;
 use zero_copy_pii_proxy::{make_router, AppState};
@@ -50,6 +51,7 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle,
+        byte_budget: Arc::new(Semaphore::new(2 * 1024 * 1024)),
     });
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -3,9 +3,10 @@
 pub mod budget_queue;
 pub mod domain;
 pub mod engine;
-pub mod engine_v2;
 
-use std::convert::Infallible;
+use crate::budget_queue::{channel, enqueue, BudgetedBody, ByteBudget};
+use crate::engine::{OutputSegment, PiiVault, StreamRedactor};
+use std::error::Error;
 use std::sync::Arc;
 
 use axum::body::{Body, BodyDataStream};
@@ -17,25 +18,50 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use bytes::Bytes;
+use bytes::BytesMut;
 use futures::StreamExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use reqwest::Client;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
-use tokio::sync::mpsc::channel;
 use tokio::sync::Semaphore;
-use tokio_stream::wrappers::ReceiverStream;
 use tower_http::request_id::{
     MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
 use tower_http::trace::TraceLayer;
 use tracing::{info_span, Instrument, Span};
 
-use engine::{PiiVault, StreamRedactor};
-
 const MAX_ACTIVE_UPSTREAM_STREAMS: usize = 1000;
 static UPSTREAM_STREAM_LIMIT: Semaphore = Semaphore::const_new(MAX_ACTIVE_UPSTREAM_STREAMS);
+pub const OUTPUT_BYTE_BUDGET: usize = 2 * 1024 * 1024;
+
+pub type BoxError = Box<dyn Error + Send + Sync>;
+
+#[derive(Debug)]
+pub enum RequestBodyError {
+    LimitExceeded { limit: usize },
+    Upstream(BoxError),
+}
+
+impl std::fmt::Display for RequestBodyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LimitExceeded { limit } => {
+                write!(formatter, "request body exceeded {limit} bytes")
+            }
+            Self::Upstream(error) => write!(formatter, "request body stream failed: {error}"),
+        }
+    }
+}
+
+impl Error for RequestBodyError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::LimitExceeded { .. } => None,
+            Self::Upstream(error) => Some(&**error),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -45,10 +71,10 @@ pub struct AppState {
     pub upstream_url: String,
     pub allowed_origins: Vec<String>,
     pub prometheus_handle: Arc<PrometheusHandle>,
+    pub byte_budget: Arc<Semaphore>,
 }
 
 pub const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
-const BODY_LIMIT_ERROR: &str = "proxy request body exceeded maximum size";
 
 /// Build the axum Router used by main and tests. Exposed publicly for integration tests.
 pub fn make_router(state: AppState) -> Router {
@@ -110,14 +136,19 @@ async fn enforce_body_limit(req: Request<Body>, next: Next) -> Result<Response<B
                     let next_total = total.saturating_add(bytes.len());
                     if next_total > MAX_BODY_SIZE {
                         Some((
-                            Err(std::io::Error::other(BODY_LIMIT_ERROR)),
+                            Err(RequestBodyError::LimitExceeded {
+                                limit: MAX_BODY_SIZE,
+                            }),
                             (stream, next_total),
                         ))
                     } else {
                         Some((Ok(bytes), (stream, next_total)))
                     }
                 }
-                Some(Err(error)) => Some((Err(std::io::Error::other(error)), (stream, total))),
+                Some(Err(error)) => Some((
+                    Err(RequestBodyError::Upstream(Box::new(error))),
+                    (stream, total),
+                )),
                 None => None,
             }
         },
@@ -244,7 +275,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         match tokio::time::timeout(Duration::from_secs(120), upstream_request.send()).await {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
-                if error.to_string().contains(BODY_LIMIT_ERROR) {
+                if contains_body_limit_error(&error) {
                     return Response::builder()
                         .status(StatusCode::PAYLOAD_TOO_LARGE)
                         .body(Body::empty())
@@ -273,23 +304,29 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let retry_after = upstream_response.headers().get("retry-after").cloned();
         let content_type = upstream_response.headers().get("content-type").cloned();
         let mut body_stream = upstream_response.bytes_stream();
-        let mut body = Vec::with_capacity(8 * 1024);
-        while let Ok(Some(chunk)) =
-            tokio::time::timeout(Duration::from_secs(3), body_stream.next()).await
-        {
-            let Ok(chunk) = chunk else {
-                break;
-            };
-            let remaining = 8 * 1024 - body.len();
-            if remaining == 0 {
-                break;
+        let mut body = BytesMut::with_capacity(8 * 1024);
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let Ok(Some(chunk)) =
+                    tokio::time::timeout(Duration::from_secs(3), body_stream.next()).await
+                else {
+                    break;
+                };
+                let Ok(chunk) = chunk else {
+                    break;
+                };
+                let remaining = 8 * 1024 - body.len();
+                if remaining == 0 {
+                    break;
+                }
+                let take = chunk.len().min(remaining);
+                body.extend_from_slice(&chunk[..take]);
+                if take == remaining {
+                    break;
+                }
             }
-            let take = chunk.len().min(remaining);
-            body.extend_from_slice(&chunk[..take]);
-            if take == remaining {
-                break;
-            }
-        }
+        })
+        .await;
         let status_label = status.as_u16().to_string();
         metrics::increment_counter!(
             "upstream_error_total",
@@ -302,12 +339,13 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         if let Some(value) = content_type {
             response = response.header("content-type", value);
         }
-        return response.body(Body::from(body)).unwrap();
+        return response.body(Body::from(body.freeze())).unwrap();
     }
 
     metrics::increment_gauge!("active_sse_streams", 1.0);
-    let (tx, rx) = channel::<Result<Bytes, Infallible>>(32);
+    let (tx, rx) = channel(32);
     let tx_task = tx.clone();
+    let byte_budget = ByteBudget::from_shared(state.byte_budget.clone(), OUTPUT_BYTE_BUDGET);
     tokio::spawn(async move {
         struct ActiveStreamGuard;
         impl Drop for ActiveStreamGuard {
@@ -331,10 +369,13 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                 break;
             };
             match item {
-                Ok(chunk) => match redactor.push(&chunk) {
+                Ok(chunk) => match redactor.push(chunk) {
                     Ok(outputs) => {
                         for output in outputs {
-                            if tx_task.send(Ok(output)).await.is_err() {
+                            let bytes = match output {
+                                OutputSegment::Input(bytes) | OutputSegment::Replacement(bytes) => bytes,
+                            };
+                            if enqueue(&tx_task, &byte_budget, bytes).await.is_err() {
                                 tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
                                 return;
                             }
@@ -354,7 +395,10 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         match redactor.finish() {
             Ok(outputs) => {
                 for output in outputs {
-                    if tx_task.send(Ok(output)).await.is_err() {
+                    let bytes = match output {
+                        OutputSegment::Input(bytes) | OutputSegment::Replacement(bytes) => bytes,
+                    };
+                    if enqueue(&tx_task, &byte_budget, bytes).await.is_err() {
                         tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
                         return;
                     }
@@ -365,9 +409,18 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     }.instrument(request_span));
 
     drop(tx);
-    let body_stream = ReceiverStream::new(rx);
     Response::builder()
         .header("content-type", "text/event-stream")
-        .body(Body::from_stream(body_stream))
+        .body(Body::new(BudgetedBody::new(rx)))
         .unwrap()
+}
+
+fn contains_body_limit_error(error: &(dyn Error + 'static)) -> bool {
+    if error
+        .downcast_ref::<RequestBodyError>()
+        .is_some_and(|error| matches!(error, RequestBodyError::LimitExceeded { .. }))
+    {
+        return true;
+    }
+    error.source().is_some_and(contains_body_limit_error)
 }

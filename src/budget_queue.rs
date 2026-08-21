@@ -23,6 +23,14 @@ impl ByteBudget {
         }
     }
 
+    pub fn from_shared(semaphore: Arc<Semaphore>, capacity: usize) -> Self {
+        assert!(capacity > 0, "byte budget must be non-zero");
+        Self {
+            semaphore,
+            capacity,
+        }
+    }
+
     pub fn capacity(&self) -> usize {
         self.capacity
     }

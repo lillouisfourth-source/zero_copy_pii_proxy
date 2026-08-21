@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use dotenvy::dotenv;
 use metrics_exporter_prometheus::PrometheusBuilder;
+use tokio::sync::Semaphore;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::ServiceBuilder;
 
@@ -87,6 +88,7 @@ async fn main() {
         upstream_url,
         allowed_origins,
         prometheus_handle,
+        byte_budget: Arc::new(Semaphore::new(2 * 1024 * 1024)),
     });
 
     // Bind to 0.0.0.0 so Docker/K8s can route to it

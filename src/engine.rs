@@ -3,9 +3,21 @@ use bytes::{Bytes, BytesMut};
 use serde_json;
 use std::str::Utf8Error;
 
-/// PiiVault holds the Aho-Corasick searcher and replacement arrays.
-/// replacements: standard text replacements
-/// escaped_replacements: JSON-escaped text (suitable for inserting into JSON string contexts)
+const DEFAULT_MAX_BUFFER_CAPACITY: usize = 64 * 1024;
+static REDACTED_BYTES: &[u8] = b"[REDACTED]";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputSegment {
+    Input(Bytes),
+    Replacement(Bytes),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum StreamRedactionError {
+    BufferLimitExceeded,
+    InvalidUtf8,
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct PiiVault {
@@ -16,18 +28,11 @@ pub struct PiiVault {
     pub escaped_replacements: Vec<String>,
 }
 
-const DEFAULT_MAX_BUFFER_CAPACITY: usize = 64 * 1024;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum StreamRedactionError {
-    BufferLimitExceeded,
-    InvalidUtf8,
-}
-
 pub struct StreamRedactor<'a> {
     vault: &'a PiiVault,
-    buffer: BytesMut,
+    pending: BytesMut,
     max_capacity: usize,
+    replacement: Bytes,
 }
 
 impl<'a> StreamRedactor<'a> {
@@ -36,65 +41,91 @@ impl<'a> StreamRedactor<'a> {
     }
 
     pub fn with_max_capacity(vault: &'a PiiVault, max_capacity: usize) -> Self {
+        assert!(
+            max_capacity > 0,
+            "redaction buffer capacity must be non-zero"
+        );
         Self {
             vault,
-            buffer: BytesMut::with_capacity(max_capacity),
+            pending: BytesMut::new(),
             max_capacity,
+            replacement: Bytes::from_static(REDACTED_BYTES),
         }
     }
 
-    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Bytes>, StreamRedactionError> {
-        let mut output = Vec::new();
-        let mut remaining = chunk;
-        while !remaining.is_empty() {
-            let available = self.max_capacity.saturating_sub(self.buffer.len());
-            if available == 0 {
-                output.extend(self.flush_available(false)?);
-                if self.buffer.len() >= self.max_capacity {
-                    return Err(StreamRedactionError::BufferLimitExceeded);
-                }
-                continue;
-            }
-            let take = remaining.len().min(available);
-            self.buffer.extend_from_slice(&remaining[..take]);
-            remaining = &remaining[take..];
-            output.extend(self.flush_available(false)?);
+    pub fn push(&mut self, chunk: Bytes) -> Result<Vec<OutputSegment>, StreamRedactionError> {
+        if chunk.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(output)
+        let source = if self.pending.is_empty() {
+            chunk
+        } else {
+            let mut combined = BytesMut::with_capacity(self.pending.len() + chunk.len());
+            combined.extend_from_slice(&self.pending);
+            combined.extend_from_slice(&chunk);
+            self.pending.clear();
+            combined.freeze()
+        };
+        self.process_source(source, false)
     }
 
-    pub fn finish(&mut self) -> Result<Vec<Bytes>, StreamRedactionError> {
-        if std::str::from_utf8(&self.buffer).is_err() {
-            return Err(StreamRedactionError::InvalidUtf8);
+    pub fn finish(&mut self) -> Result<Vec<OutputSegment>, StreamRedactionError> {
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
         }
-        self.flush_available(true)
+        let source = self.pending.split().freeze();
+        self.process_source(source, true)
     }
 
-    fn flush_available(&mut self, flush_all: bool) -> Result<Vec<Bytes>, StreamRedactionError> {
-        let valid_len = match std::str::from_utf8(&self.buffer) {
+    fn process_source(
+        &mut self,
+        source: Bytes,
+        flush_all: bool,
+    ) -> Result<Vec<OutputSegment>, StreamRedactionError> {
+        let valid_len = match std::str::from_utf8(&source) {
             Ok(text) => text.len(),
             Err(error) if error.error_len().is_none() => valid_utf8_prefix(error),
             Err(_) => return Err(StreamRedactionError::InvalidUtf8),
         };
-        if valid_len == 0 {
-            return Ok(Vec::new());
+        if flush_all && valid_len != source.len() {
+            return Err(StreamRedactionError::InvalidUtf8);
         }
-
-        let text = std::str::from_utf8(&self.buffer[..valid_len])
+        let text = std::str::from_utf8(&source[..valid_len])
             .map_err(|_| StreamRedactionError::InvalidUtf8)?;
-        let (safe, _) = if flush_all {
-            (text, "")
+        let safe_len = if flush_all {
+            text.len()
         } else {
-            determine_safe_boundary(text, self.vault)
+            determine_safe_boundary(text, self.vault).0.len()
         };
-        if safe.is_empty() {
-            return Ok(Vec::new());
+        let output = self.redact_source(&source, safe_len);
+        let retained_end = if flush_all { source.len() } else { valid_len };
+        if safe_len < retained_end {
+            self.pending
+                .extend_from_slice(&source[safe_len..retained_end]);
         }
+        if !flush_all && valid_len < source.len() {
+            self.pending.extend_from_slice(&source[valid_len..]);
+        }
+        if self.pending.len() > self.max_capacity {
+            return Err(StreamRedactionError::BufferLimitExceeded);
+        }
+        Ok(output)
+    }
 
-        let output = redact_text(safe, self.vault).into_owned();
-        let consumed = safe.len();
-        let _ = self.buffer.split_to(consumed);
-        Ok(vec![Bytes::from(output)])
+    fn redact_source(&self, source: &Bytes, safe_len: usize) -> Vec<OutputSegment> {
+        let mut output = Vec::new();
+        let mut last = 0;
+        for mat in self.vault.searcher.find_iter(&source[..safe_len]) {
+            if mat.start() > last {
+                output.push(OutputSegment::Input(source.slice(last..mat.start())));
+            }
+            output.push(OutputSegment::Replacement(self.replacement.clone()));
+            last = mat.end();
+        }
+        if last < safe_len {
+            output.push(OutputSegment::Input(source.slice(last..safe_len)));
+        }
+        output
     }
 }
 
@@ -103,8 +134,6 @@ fn valid_utf8_prefix(error: Utf8Error) -> usize {
 }
 
 impl PiiVault {
-    /// Create a new vault from patterns and corresponding replacements.
-    /// patterns.len() must equal replacements.len().
     pub fn new(patterns: &[&str], replacements: &[&str]) -> Self {
         assert_eq!(
             patterns.len(),
@@ -112,23 +141,14 @@ impl PiiVault {
             "patterns and replacements length mismatch"
         );
         let searcher = AhoCorasick::new(patterns).expect("failed to build aho-corasick automaton");
-
-        // compute maximum pattern length in bytes
-        let max_pattern_len = patterns.iter().map(|p| p.len()).max().unwrap_or(0);
-
-        // copy replacements into owned Strings
         let replacements_vec = replacements
             .iter()
-            .map(|s| s.to_string())
+            .map(|value| (*value).to_string())
             .collect::<Vec<_>>();
-
-        // compute JSON-escaped versions of replacements (without surrounding quotes)
         let escaped_replacements_vec = replacements
             .iter()
-            .map(|s| {
-                // serde_json::to_string will return a quoted JSON string e.g. "foo\nbar"
-                let quoted = serde_json::to_string(s).unwrap_or_else(|_| String::from("\"\""));
-                // strip the surrounding quotes if present
+            .map(|value| {
+                let quoted = serde_json::to_string(value).unwrap_or_else(|_| String::from("\"\""));
                 if quoted.len() >= 2 && quoted.starts_with('"') && quoted.ends_with('"') {
                     quoted[1..quoted.len() - 1].to_string()
                 } else {
@@ -136,10 +156,13 @@ impl PiiVault {
                 }
             })
             .collect::<Vec<_>>();
-
         Self {
             searcher,
-            max_pattern_len,
+            max_pattern_len: patterns
+                .iter()
+                .map(|pattern| pattern.len())
+                .max()
+                .unwrap_or(0),
             patterns: patterns
                 .iter()
                 .map(|pattern| (*pattern).to_string())
@@ -150,54 +173,36 @@ impl PiiVault {
     }
 }
 
-/// Redact text using the vault. Returns a Cow that is Borrowed when no match is found,
-/// or Owned with replacements applied when matches exist.
 pub fn redact_text<'a>(text: &'a str, vault: &PiiVault) -> std::borrow::Cow<'a, str> {
     if vault.searcher.find(text).is_none() {
         return std::borrow::Cow::Borrowed(text);
     }
-
-    // iterate matches and build replaced string
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0usize;
+    let mut output = String::with_capacity(text.len());
+    let mut last = 0;
     for mat in vault.searcher.find_iter(text) {
-        let (start, end, pat) = (mat.start(), mat.end(), mat.pattern());
-        if start >= last {
-            out.push_str(&text[last..start]);
-            let repl = &vault.replacements[pat];
-            out.push_str(repl);
-            last = end;
+        if mat.start() >= last {
+            output.push_str(&text[last..mat.start()]);
+            output.push_str(&vault.replacements[mat.pattern()]);
+            last = mat.end();
         }
     }
-    out.push_str(&text[last..]);
-    // Log that a redaction occurred so telemetry can aggregate redaction counts without
-    // exposing PII. This is intentionally minimal.
+    output.push_str(&text[last..]);
     tracing::info!("redaction applied: replaced patterns detected");
-    // increment redaction counter for telemetry (do not include PII in metric labels)
     metrics::increment_counter!("pii_redactions_total");
-    std::borrow::Cow::Owned(out)
+    std::borrow::Cow::Owned(output)
 }
 
-/// Determine a safe flush boundary for `text` given the vault patterns.
-/// Returns a tuple (safe_to_flush, hold_in_tail_buffer) as borrowed slices of the input.
-/// CRITICAL: ensures the split index is a UTF-8 char boundary using is_char_boundary.
 pub fn determine_safe_boundary<'a>(text: &'a str, vault: &PiiVault) -> (&'a str, &'a str) {
-    // If there are no patterns or max pattern length <= 1, nothing to guard for.
     if vault.max_pattern_len <= 1 {
         return (text, "");
     }
-
-    // If the text is short, hold it entirely to avoid chopping potential matches.
     if text.len() <= vault.max_pattern_len {
         return ("", text);
     }
-
-    let text_bytes = text.as_bytes();
-    let mut partial_len = 0usize;
+    let mut partial_len = 0;
     for pattern in &vault.patterns {
-        let max_prefix_len = pattern.len().min(text_bytes.len());
-        for prefix_len in 1..max_prefix_len {
-            if text_bytes.ends_with(&pattern.as_bytes()[..prefix_len]) {
+        for prefix_len in 1..pattern.len().min(text.len()) {
+            if text.as_bytes().ends_with(&pattern.as_bytes()[..prefix_len]) {
                 partial_len = partial_len.max(prefix_len);
             }
         }
@@ -205,64 +210,92 @@ pub fn determine_safe_boundary<'a>(text: &'a str, vault: &PiiVault) -> (&'a str,
     if partial_len == 0 {
         return (text, "");
     }
-
-    let mut split_at = text.len().saturating_sub(partial_len);
-
-    // Walk backwards until we find a char boundary to avoid splitting multi-byte UTF-8 chars.
+    let mut split_at = text.len() - partial_len;
     while split_at > 0 && !text.is_char_boundary(split_at) {
         split_at -= 1;
     }
-
-    // If somehow we couldn't find a boundary (very unlikely), fallback to holding everything.
     if split_at == 0 {
-        return ("", text);
+        ("", text)
+    } else {
+        (&text[..split_at], &text[split_at..])
     }
-
-    (&text[..split_at], &text[split_at..])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn vault() -> PiiVault {
+        PiiVault::new(&["password", "secret"], &["[REDACTED]", "[REDACTED]"])
+    }
+
     #[test]
     fn test_basic_redaction() {
-        let vault = PiiVault::new(&["password", "secret"], &["[REDACTED]", "[REDACTED]"]);
-        let out = redact_text("my password is secret", &vault);
-        assert_eq!(out, "my [REDACTED] is [REDACTED]");
+        assert_eq!(
+            redact_text("my password is secret", &vault()),
+            "my [REDACTED] is [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn passing_frame_is_sliced_without_copying() {
+        let source = Bytes::from_static(b"prefix suffix");
+        let configured = vault();
+        let mut redactor = StreamRedactor::new(&configured);
+        assert_eq!(
+            redactor.push(source.clone()).unwrap(),
+            vec![OutputSegment::Input(source)]
+        );
     }
 
     #[test]
     fn test_boundary_hold_partial_pii() {
-        // Create a vault with a max pattern length of 5 by including a 5-byte pattern
-        // and also include the shorter pattern "pass" which appears in the text.
-        let vault = PiiVault::new(&["xxxxx", "pass"], &["[REDACTED]", "[REDACTED]"]);
-        let (safe, tail) = determine_safe_boundary("my pass", &vault);
+        let configured = PiiVault::new(&["xxxxx", "pass"], &["[REDACTED]", "[REDACTED]"]);
+        let (safe, tail) = determine_safe_boundary("my pass", &configured);
         assert_eq!(safe, "my pass");
         assert_eq!(tail, "");
     }
 
     #[test]
     fn test_utf8_char_boundary_panic_trap() {
-        let vault = PiiVault::new(&["🚀abc"], &["[REDACTED]"]);
-        let text = "Hello 🚀";
-        let (safe, tail) = determine_safe_boundary(text, &vault);
+        let configured = PiiVault::new(&["🚀abc"], &["[REDACTED]"]);
+        let (safe, tail) = determine_safe_boundary("Hello 🚀", &configured);
         assert_eq!(safe, "Hello ");
         assert_eq!(tail, "🚀");
     }
 
     #[test]
-    fn test_cross_chunk_reconstruction_with_state() {
-        let vault = PiiVault::new(&["password"], &["[REDACTED]"]);
-        let mut redactor = StreamRedactor::new(&vault);
+    fn split_utf8_and_pii_are_redacted() {
+        let configured = PiiVault::new(
+            &["password", "email@example.com"],
+            &["[REDACTED]", "[REDACTED]"],
+        );
+        let mut redactor = StreamRedactor::new(&configured);
         let mut output = Vec::new();
-        output.extend(redactor.push(b"pass").unwrap());
-        output.extend(redactor.push(b"word").unwrap());
+        for chunk in [
+            b"hello \xF0\x9F".as_slice(),
+            b"\x9A\x80 password e".as_slice(),
+            b"mail@example.com".as_slice(),
+        ] {
+            output.extend(redactor.push(Bytes::copy_from_slice(chunk)).unwrap());
+        }
         output.extend(redactor.finish().unwrap());
-        let output = output
+        let collected = output
             .into_iter()
-            .flat_map(|chunk| chunk.to_vec())
+            .flat_map(|segment| match segment {
+                OutputSegment::Input(bytes) | OutputSegment::Replacement(bytes) => bytes.to_vec(),
+            })
             .collect::<Vec<_>>();
-        assert_eq!(String::from_utf8(output).unwrap(), "[REDACTED]");
+        assert_eq!(collected, b"hello \xF0\x9F\x9A\x80 [REDACTED] [REDACTED]");
+    }
+
+    #[test]
+    fn pending_state_has_a_hard_bound() {
+        let configured = PiiVault::new(&["sensitive"], &["[REDACTED]"]);
+        let mut redactor = StreamRedactor::with_max_capacity(&configured, 8);
+        assert_eq!(
+            redactor.push(Bytes::from_static(b"123456789")),
+            Err(StreamRedactionError::BufferLimitExceeded)
+        );
     }
 }
