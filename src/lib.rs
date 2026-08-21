@@ -172,13 +172,17 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     // Count requests independently from streams; a stream exists only after upstream success.
     metrics::increment_counter!("proxy_requests_total");
     let request_span = Span::current();
+    let request_id = req
+        .extensions()
+        .get::<RequestId>()
+        .map(|id| id.header_value().clone())
+        .or_else(|| req.headers().get("x-request-id").cloned());
 
     let body_stream: BodyDataStream = req.into_body().into_data_stream();
     let request_body = reqwest::Body::wrap_stream(body_stream);
     let stream_permit = match UPSTREAM_STREAM_LIMIT.acquire().await {
         Ok(permit) => permit,
         Err(_) => {
-            metrics::decrement_gauge!("active_sse_streams", 1.0);
             tracing::error!("upstream stream semaphore closed");
             return Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -187,41 +191,53 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         }
     };
 
-    let upstream_response = match tokio::time::timeout(
-        Duration::from_secs(120),
-        state
-            .client
-            .post(&state.upstream_url)
-            .body(request_body)
-            .send(),
-    )
-    .await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
-            metrics::increment_counter!("proxy_gateway_error_total");
-            tracing::error!(error = %error, "upstream request failed");
-            return Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::empty())
-                .unwrap();
-        }
-        Err(_) => {
-            metrics::increment_counter!("proxy_gateway_error_total");
-            tracing::warn!("upstream request timed out");
-            return Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::empty())
-                .unwrap();
-        }
-    };
+    let mut upstream_request = state.client.post(&state.upstream_url).body(request_body);
+    if let Some(request_id) = request_id {
+        upstream_request = upstream_request.header("x-request-id", request_id);
+    }
+
+    let upstream_response =
+        match tokio::time::timeout(Duration::from_secs(120), upstream_request.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                metrics::increment_counter!("proxy_gateway_error_total");
+                tracing::error!(error = %error, "upstream request failed");
+                return Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::empty())
+                    .unwrap();
+            }
+            Err(_) => {
+                metrics::increment_counter!("proxy_gateway_error_total");
+                tracing::warn!("upstream request timed out");
+                return Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::empty())
+                    .unwrap();
+            }
+        };
 
     if !upstream_response.status().is_success() {
         let status = StatusCode::from_u16(upstream_response.status().as_u16())
             .unwrap_or(StatusCode::BAD_GATEWAY);
         let retry_after = upstream_response.headers().get("retry-after").cloned();
         let content_type = upstream_response.headers().get("content-type").cloned();
-        let body = upstream_response.bytes().await.unwrap_or_default();
+        let mut body_stream = upstream_response.bytes_stream();
+        let mut body = Vec::with_capacity(8 * 1024);
+        while let Some(chunk) = body_stream.next().await {
+            let Ok(chunk) = chunk else {
+                break;
+            };
+            let remaining = 8 * 1024 - body.len();
+            if remaining == 0 {
+                break;
+            }
+            let take = chunk.len().min(remaining);
+            body.extend_from_slice(&chunk[..take]);
+            if take == remaining {
+                break;
+            }
+        }
         let status_label = status.as_u16().to_string();
         metrics::increment_counter!(
             "upstream_error_total",

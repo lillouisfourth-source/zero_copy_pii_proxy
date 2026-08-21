@@ -11,9 +11,21 @@
     },
     {
       "type": "timeseries",
-      "title": "HTTP Requests Rate (1m)",
+      "title": "Proxy Requests Rate (1m)",
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
-      "targets": [ { "expr": "rate(http_requests_total[1m])", "refId": "A" } ]
+      "targets": [ { "expr": "rate(proxy_requests_total[1m])", "refId": "A" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Upstream Errors Rate (1m)",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "targets": [ { "expr": "rate(upstream_error_total[1m])", "refId": "A" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway Errors Rate (1m)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "targets": [ { "expr": "rate(proxy_gateway_error_total[1m])", "refId": "A" } ]
     }
   ]
 }

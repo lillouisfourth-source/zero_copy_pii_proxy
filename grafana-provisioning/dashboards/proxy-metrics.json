@@ -29,6 +29,24 @@
       "title": "PII Redactions",
       "type": "timeseries",
       "targets": [{ "expr": "rate(pii_redactions_total[1m])", "legendFormat": "redactions/s", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 4,
+      "title": "Upstream Errors / Second",
+      "type": "timeseries",
+      "targets": [{ "expr": "rate(upstream_error_total[1m])", "legendFormat": "upstream errors/s", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 5,
+      "title": "Gateway Errors / Second",
+      "type": "timeseries",
+      "targets": [{ "expr": "rate(proxy_gateway_error_total[1m])", "legendFormat": "gateway errors/s", "refId": "A" }]
     }
   ],
   "schemaVersion": 39,

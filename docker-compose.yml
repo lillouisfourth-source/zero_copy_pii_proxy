@@ -17,6 +17,7 @@ services:
       - "3000:3000"
     environment:
       - RUST_LOG=info
+      - PROXY_API_KEY=dev_key_change_me
       - UPSTREAM_API_URL=http://mock-upstream:8081
     depends_on:
       - mock-upstream
