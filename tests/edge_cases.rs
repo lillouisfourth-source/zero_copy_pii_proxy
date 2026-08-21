@@ -127,6 +127,27 @@ async fn upstream_connection_failure_returns_502_and_gateway_metric() {
     proxy_task.abort();
 }
 
+#[tokio::test]
+async fn rejects_payloads_larger_than_two_megabytes() {
+    let (proxy_url, proxy_task) = start_proxy("http://127.0.0.1:9".to_string()).await;
+    let client = Client::new();
+    let oversized_body = vec![b'x'; 2 * 1024 * 1024 + 512 * 1024];
+    let response = client
+        .post(format!("{proxy_url}/v1/chat/completions"))
+        .header("Authorization", "Bearer test_key")
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", oversized_body.len())
+        .body(oversized_body)
+        .send()
+        .await;
+
+    match response {
+        Ok(response) => assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE),
+        Err(_) => {}
+    }
+    proxy_task.abort();
+}
+
 #[test]
 fn binary_refuses_to_start_without_proxy_api_key() {
     let binary = env!("CARGO_BIN_EXE_zero_copy_pii_proxy");

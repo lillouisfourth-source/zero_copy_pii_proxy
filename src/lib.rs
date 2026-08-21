@@ -46,6 +46,7 @@ pub struct AppState {
 }
 
 pub const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
+const BODY_LIMIT_ERROR: &str = "proxy request body exceeded maximum size";
 
 /// Build the axum Router used by main and tests. Exposed publicly for integration tests.
 pub fn make_router(state: AppState) -> Router {
@@ -68,6 +69,7 @@ pub fn make_router(state: AppState) -> Router {
         .with_state(state.clone())
         // Global body limit to mitigate OOM/memory attacks (2 MiB)
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(middleware::from_fn(enforce_body_limit))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             cors_middleware,
@@ -84,6 +86,46 @@ pub fn make_router(state: AppState) -> Router {
         )
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+}
+
+async fn enforce_body_limit(req: Request<Body>, next: Next) -> Result<Response<Body>, StatusCode> {
+    if req
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > MAX_BODY_SIZE)
+    {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    let (parts, body) = req.into_parts();
+    let limited_stream = futures::stream::unfold(
+        (body.into_data_stream(), 0usize),
+        |(mut stream, total)| async move {
+            match stream.next().await {
+                Some(Ok(bytes)) => {
+                    let next_total = total.saturating_add(bytes.len());
+                    if next_total > MAX_BODY_SIZE {
+                        Some((
+                            Err(std::io::Error::other(BODY_LIMIT_ERROR)),
+                            (stream, next_total),
+                        ))
+                    } else {
+                        Some((Ok(bytes), (stream, next_total)))
+                    }
+                }
+                Some(Err(error)) => Some((Err(std::io::Error::other(error)), (stream, total))),
+                None => None,
+            }
+        },
+    );
+    Ok(next
+        .run(Request::from_parts(
+            parts,
+            Body::from_stream(limited_stream),
+        ))
+        .await)
 }
 
 async fn proxy_handler(State(state): State<AppState>, req: Request<Body>) -> Response<Body> {
@@ -200,6 +242,12 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         match tokio::time::timeout(Duration::from_secs(120), upstream_request.send()).await {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
+                if error.to_string().contains(BODY_LIMIT_ERROR) {
+                    return Response::builder()
+                        .status(StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(Body::empty())
+                        .unwrap();
+                }
                 metrics::increment_counter!("proxy_gateway_error_total");
                 tracing::error!(error = %error, "upstream request failed");
                 return Response::builder()
@@ -224,7 +272,9 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let content_type = upstream_response.headers().get("content-type").cloned();
         let mut body_stream = upstream_response.bytes_stream();
         let mut body = Vec::with_capacity(8 * 1024);
-        while let Some(chunk) = body_stream.next().await {
+        while let Ok(Some(chunk)) =
+            tokio::time::timeout(Duration::from_secs(3), body_stream.next()).await
+        {
             let Ok(chunk) = chunk else {
                 break;
             };

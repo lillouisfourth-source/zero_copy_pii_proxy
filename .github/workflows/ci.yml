@@ -15,7 +15,7 @@ jobs:
     name: Rust Tests & Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
@@ -34,11 +34,15 @@ jobs:
     name: Verify Docker Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
         with:
           fetch-depth: 0
       - name: Build Docker Image
         run: docker build -t zero-copy-pii-proxy:test .
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+      - name: Validate Helm chart
+        run: helm lint charts/zero-copy-pii-proxy
       - name: Start k6 test target
         shell: bash
         run: |
@@ -63,7 +67,7 @@ jobs:
           docker run --network pii-ci \
             -v ${{ github.workspace }}:/scripts \
             -e TARGET_URL=http://pii-ci-proxy:3000/v1/chat/completions \
-            grafana/k6:latest run /scripts/tests/redteam/load_test.js
+            grafana/k6:0.49.0 run /scripts/tests/redteam/load_test.js
       - name: Stop k6 test target
         if: always()
         shell: bash
@@ -75,6 +79,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: 'zero-copy-pii-proxy:test'
+          version: 'v0.74.0'
           format: 'sarif'
           output: 'trivy-results.sarif'
           exit-code: '1'
@@ -83,10 +88,11 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: 'zero-copy-pii-proxy:test'
+          version: 'v0.74.0'
           format: 'cyclonedx'
           output: 'sbom.json'
       - name: Upload security artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: security-artifacts
           path: |
