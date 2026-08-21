@@ -298,4 +298,22 @@ mod tests {
             Err(StreamRedactionError::BufferLimitExceeded)
         );
     }
+
+    #[test]
+    fn redacted_stream_has_expected_blake3_receipt() {
+        let configured = PiiVault::new(&["password"], &["[REDACTED]"]);
+        let mut redactor = StreamRedactor::new(&configured);
+        let mut hasher = blake3::Hasher::new();
+        let mut outputs = redactor
+            .push(Bytes::from_static(b"password stays private"))
+            .unwrap();
+        outputs.extend(redactor.finish().unwrap());
+        for output in outputs {
+            let bytes = match output {
+                OutputSegment::Input(bytes) | OutputSegment::Replacement(bytes) => bytes,
+            };
+            hasher.update(&bytes);
+        }
+        assert_eq!(hasher.finalize(), blake3::hash(b"[REDACTED] stays private"));
+    }
 }

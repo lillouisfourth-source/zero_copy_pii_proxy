@@ -357,7 +357,9 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let _stream_permit = stream_permit;
         let mut stream = upstream_response.bytes_stream();
         let mut redactor = StreamRedactor::new(&state.vault);
-        loop {
+        let mut hasher = blake3::Hasher::new();
+        let mut finalized = false;
+        let reached_eof = loop {
             let item = match tokio::time::timeout(Duration::from_secs(15), stream.next()).await {
                 Ok(item) => item,
                 Err(_) => {
@@ -366,7 +368,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                 }
             };
             let Some(item) = item else {
-                break;
+                break true;
             };
             match item {
                 Ok(chunk) => match redactor.push(chunk) {
@@ -375,6 +377,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                             let bytes = match output {
                                 OutputSegment::Input(bytes) | OutputSegment::Replacement(bytes) => bytes,
                             };
+                            hasher.update(&bytes);
                             if enqueue(&tx_task, &byte_budget, bytes).await.is_err() {
                                 tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
                                 return;
@@ -391,20 +394,28 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                     return;
                 }
             }
-        }
+        };
         match redactor.finish() {
             Ok(outputs) => {
                 for output in outputs {
                     let bytes = match output {
                         OutputSegment::Input(bytes) | OutputSegment::Replacement(bytes) => bytes,
                     };
+                    hasher.update(&bytes);
                     if enqueue(&tx_task, &byte_budget, bytes).await.is_err() {
                         tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
                         return;
                     }
                 }
+                finalized = true;
             }
             Err(error) => tracing::warn!("upstream stream rejected at end: {:?}", error),
+        }
+        if reached_eof && finalized {
+            tracing::info!(
+                redaction_receipt = %hasher.finalize().to_hex(),
+                "Redaction stream completed successfully"
+            );
         }
     }.instrument(request_span));
 
