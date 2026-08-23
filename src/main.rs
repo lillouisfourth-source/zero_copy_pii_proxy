@@ -1,5 +1,6 @@
 #![deny(warnings)]
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,14 +80,13 @@ async fn main() {
             panic!("PROXY_PRIVATE_KEY must be configured as a valid 32-byte hex or base64 seed")
         });
 
-    // Read API key once and fail closed when it is not configured.
-    let api_key = std::env::var("PROXY_API_KEY")
-        .ok()
-        .filter(|key| !key.is_empty())
-        .unwrap_or_else(|| {
-            tracing::error!("PROXY_API_KEY is missing or empty; refusing to start");
-            panic!("PROXY_API_KEY must be configured")
-        });
+    let auth_file = std::env::var("PROXY_AUTH_FILE").ok().map(PathBuf::from);
+    let auth_source = auth_file
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .or_else(|| std::env::var("PROXY_API_KEY").ok())
+        .unwrap_or_else(|| panic!("PROXY_AUTH_FILE or PROXY_API_KEY must be configured"));
+    let auth_keyring = Arc::new(ArcSwap::new(Arc::new(hash_keyring(&auth_source))));
 
     let client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(90))
@@ -101,12 +101,16 @@ async fn main() {
             watch_pii_config(&watch_path, watch_vault);
         });
     }
+    if let Some(auth_path) = auth_file {
+        let watch_keyring = auth_keyring.clone();
+        tokio::task::spawn_blocking(move || watch_auth_file(&auth_path, watch_keyring));
+    }
 
     let metrics_app = make_metrics_router(prometheus_handle.clone());
     let app = make_router(AppState {
         client,
         vault,
-        api_key,
+        auth_keyring,
         upstream_url,
         allowed_origins,
         prometheus_handle,
@@ -164,6 +168,44 @@ async fn main() {
         })
         .await
         .unwrap();
+}
+
+fn hash_keyring(source: &str) -> HashSet<[u8; 32]> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| *blake3::hash(token.as_bytes()).as_bytes())
+        .collect()
+}
+
+fn watch_auth_file(path: &Path, keyring: Arc<ArcSwap<HashSet<[u8; 32]>>>) {
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = recommended_watcher(move |event: Result<Event, notify::Error>| {
+        let _ = tx.send(event);
+    })
+    .expect("failed to create auth watcher");
+    watcher
+        .watch(directory, RecursiveMode::NonRecursive)
+        .expect("failed to watch auth directory");
+    for event in rx {
+        let Ok(event) = event else { continue };
+        if !event.paths.iter().any(|event_path| {
+            event_path == path || event_path.file_name().is_some_and(|name| name == "..data")
+        }) {
+            continue;
+        }
+        for delay in [100, 500, 1_000, 2_000] {
+            match std::fs::read_to_string(path) {
+                Ok(contents) => {
+                    keyring.store(Arc::new(hash_keyring(&contents)));
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(delay)),
+            }
+        }
+    }
 }
 
 fn parse_pii_config(source: &str) -> (Vec<String>, Vec<String>) {

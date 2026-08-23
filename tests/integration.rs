@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use reqwest::Client;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
@@ -50,7 +51,9 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
             .build()
             .unwrap(),
         vault,
-        api_key: api_key.clone(),
+        auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(HashSet::from([
+            *blake3::hash(api_key.as_bytes()).as_bytes(),
+        ]))),
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle: prometheus_handle.clone(),

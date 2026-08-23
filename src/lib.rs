@@ -10,6 +10,7 @@ use base64::engine::general_purpose::STANDARD as B64Std;
 use base64::Engine;
 use bytes::Bytes;
 use ed25519_dalek::{Signer, SigningKey};
+use std::collections::HashSet;
 use std::error::Error;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -30,7 +31,6 @@ use futures::StreamExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use reqwest::Client;
 use std::time::Duration;
-use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use tower_http::request_id::{
     MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
@@ -76,7 +76,7 @@ impl Error for RequestBodyError {
 pub struct AppState {
     pub client: Client,
     pub vault: Arc<arc_swap::ArcSwap<PiiVault>>,
-    pub api_key: String,
+    pub auth_keyring: Arc<arc_swap::ArcSwap<HashSet<[u8; 32]>>>,
     pub upstream_url: String,
     pub allowed_origins: Vec<String>,
     pub prometheus_handle: Arc<PrometheusHandle>,
@@ -208,13 +208,15 @@ async fn require_auth(
     if let Some(hv) = req.headers().get("authorization") {
         if let Ok(s) = hv.to_str() {
             if let Some(token) = s.strip_prefix("Bearer ") {
-                if token.as_bytes().ct_eq(state.api_key.as_bytes()).into() {
+                let token_hash = *blake3::hash(token.as_bytes()).as_bytes();
+                if state.auth_keyring.load().contains(&token_hash) {
                     let resp = next.run(req).await;
                     return Ok(resp);
                 }
             }
         }
     }
+    metrics::increment_counter!("proxy_auth_failures_total");
     Err(StatusCode::UNAUTHORIZED)
 }
 

@@ -5,6 +5,7 @@ use axum::routing::post;
 use axum::Router;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use reqwest::Client;
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
@@ -33,7 +34,9 @@ async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::Join
     let router = make_router(AppState {
         client: Client::builder().build().expect("client"),
         vault,
-        api_key: "test_key".to_string(),
+        auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(HashSet::from([
+            *blake3::hash(b"test_key").as_bytes(),
+        ]))),
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle: metrics_handle(),

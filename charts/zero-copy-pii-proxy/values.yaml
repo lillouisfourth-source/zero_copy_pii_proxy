@@ -57,4 +57,5 @@ networkPolicy:
 
 secrets:
   apiKey: replace-me
+  authTokens: ""
   proxyPrivateKey: ""
