@@ -42,7 +42,7 @@ const MAX_ACTIVE_UPSTREAM_STREAMS: usize = 1000;
 static UPSTREAM_STREAM_LIMIT: Semaphore = Semaphore::const_new(MAX_ACTIVE_UPSTREAM_STREAMS);
 static ACTIVE_SSE_STREAMS: AtomicUsize = AtomicUsize::new(0);
 pub const OUTPUT_BYTE_BUDGET: usize = 2 * 1024 * 1024;
-const SSE_DONE_MARKER: &[u8] = b"data: [DONE]";
+pub const SSE_DONE_MARKER: &[u8] = b"data: [DONE]";
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
 
@@ -566,13 +566,13 @@ async fn forward_stream_events(
 }
 
 #[derive(Default)]
-struct DoneDetector {
+pub struct DoneDetector {
     trailing: BytesMut,
     completed: bool,
 }
 
 impl DoneDetector {
-    fn inspect(
+    pub fn inspect(
         &mut self,
         bytes: Bytes,
         private_key: &SigningKey,
@@ -682,7 +682,7 @@ impl DoneDetector {
         ]
     }
 
-    fn finish(&mut self, hasher: &mut blake3::Hasher) -> Vec<StreamEvent> {
+    pub fn finish(&mut self, hasher: &mut blake3::Hasher) -> Vec<StreamEvent> {
         if self.trailing.is_empty() {
             return Vec::new();
         }

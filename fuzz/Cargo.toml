@@ -1,0 +1,24 @@
+[package]
+name = "zero_copy_pii_proxy-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+blake3 = "1.8"
+bytes = "1.4"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+
+[dependencies.zero_copy_pii_proxy]
+path = ".."
+
+[[bin]]
+name = "fuzz_target_1"
+path = "fuzz_targets/fuzz_target_1.rs"
+test = false
+doc = false
+bench = false
