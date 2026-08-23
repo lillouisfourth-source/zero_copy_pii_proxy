@@ -56,6 +56,5 @@ networkPolicy:
   egressCidrs: []
 
 secrets:
-  apiKey: replace-me
-  authTokens: ""
+  authTokens: "replace-me"
   proxyPrivateKey: ""

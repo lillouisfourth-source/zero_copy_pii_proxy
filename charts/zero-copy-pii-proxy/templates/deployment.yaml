@@ -52,36 +52,22 @@ spec:
             - name: PII_CONFIG_PATH
               value: /etc/zero-copy-pii-proxy/PII_PATTERNS
             {{- end }}
-            {{- if .Values.secrets.authTokens }}
             - name: PROXY_AUTH_FILE
               value: /etc/zero-copy-pii-proxy-auth/AUTH_TOKENS
-            {{- else }}
-            - name: PROXY_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
-                  key: PROXY_API_KEY
-            {{- end }}
-            {{- if .Values.secrets.proxyPrivateKey }}
             - name: PROXY_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
                   key: PROXY_PRIVATE_KEY
-            {{- end }}
-          {{- if or .Values.config.piiConfigMap .Values.secrets.authTokens }}
           volumeMounts:
             {{- if .Values.config.piiConfigMap }}
             - name: pii-config
               mountPath: /etc/zero-copy-pii-proxy
               readOnly: true
             {{- end }}
-            {{- if .Values.secrets.authTokens }}
             - name: auth-file
               mountPath: /etc/zero-copy-pii-proxy-auth
               readOnly: true
-            {{- end }}
-          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.config.proxyPort }}
@@ -101,16 +87,12 @@ spec:
               port: metrics
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
-      {{- if or .Values.config.piiConfigMap .Values.secrets.authTokens }}
       volumes:
         {{- if .Values.config.piiConfigMap }}
         - name: pii-config
           configMap:
             name: {{ .Values.config.piiConfigMap }}
         {{- end }}
-        {{- if .Values.secrets.authTokens }}
         - name: auth-file
           secret:
             secretName: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
-        {{- end }}
-      {{- end }}

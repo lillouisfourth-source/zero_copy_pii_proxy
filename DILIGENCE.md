@@ -8,7 +8,7 @@ The Zero-Copy PII Proxy is an asynchronous Rust/Axum edge service for authentica
 
 1. Axum accepts `POST /v1/chat/completions` on port 3000.
 2. `AppState` supplies one pooled `reqwest::Client`, the `PiiVault`, credentials, upstream URL, CORS policy, and metrics handle.
-3. Authentication compares bearer-token bytes with `subtle::ConstantTimeEq`.
+3. Authentication hashes bearer tokens with BLAKE3 and checks a hot-swappable digest keyring loaded strictly from `PROXY_AUTH_FILE`.
 4. `DefaultBodyLimit::max(MAX_BODY_SIZE)` enforces the single 2 MiB inbound limit.
 5. `Body::into_data_stream()` is wrapped directly in `reqwest::Body`; the complete inbound request is not materialized with `to_bytes`.
 6. The upstream response is consumed as a byte stream.
@@ -57,7 +57,7 @@ The client is shared through `AppState`, reducing repeated TCP/TLS handshakes an
 
 ## Observability
 
-Prometheus metrics are served at `/metrics` on port 3000:
+Prometheus metrics are served at `/metrics` on internal port 9090:
 
 - `proxy_requests_total`
 - `active_sse_streams`
@@ -80,7 +80,7 @@ The Helm chart at `charts/zero-copy-pii-proxy` parameterizes:
 - Probe timing.
 - `UPSTREAM_API_URL`.
 - `ALLOWED_ORIGINS`.
-- `PROXY_API_KEY`.
+- `PROXY_AUTH_FILE` and Secret-backed overlapping token files.
 
 The chart renders Deployment, Service, ConfigMap, and Secret resources.
 
@@ -98,4 +98,4 @@ The project has passed:
 
 ## Remaining Production Decisions
 
-The production operator should provide real image registries, secret management, TLS ingress, HPA/PDB policies, NetworkPolicies, byte-budgeted queueing if chunk sizes are untrusted, request correlation IDs, and explicit metrics for timeout, disconnect, semaphore wait, and backpressure events.
+The production operator must provide a non-empty `PROXY_AUTH_FILE` keyring, stable signing-key management, real image registries, TLS ingress, HPA/PDB policies, NetworkPolicies, request correlation IDs, and explicit metrics for timeout, disconnect, semaphore wait, and backpressure events.

@@ -36,3 +36,6 @@ mimalloc = "0.1"
 async-stream = "0.3"
 subtle = "2.6"
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+proptest = "1.6"

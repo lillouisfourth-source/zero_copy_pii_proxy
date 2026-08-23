@@ -94,6 +94,77 @@ pub enum StreamEvent {
     DoneMarker(Bytes),
 }
 
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn arbitrary_fragments_preserve_valid_redacted_data(input in any::<Vec<u8>>()) {
+            let Ok(text) = std::str::from_utf8(&input) else { return Ok(()) };
+            let vault = PiiVault::new(
+                &["password", "secret"],
+                &["[REDACTED]", "[REDACTED]"],
+            );
+            let expected = crate::engine::redact_text(text, &vault).into_owned();
+            let mut redactor = StreamRedactor::new(&vault);
+            let mut output = Vec::new();
+            for byte in input {
+                let Ok(segments) = redactor.push(Bytes::from(vec![byte])) else { return Ok(()) };
+                output.extend(segments.into_iter().map(|segment| match segment {
+                    OutputSegment::Input(bytes) | OutputSegment::Replacement(bytes) => bytes,
+                }));
+            }
+            let Ok(segments) = redactor.finish() else { return Ok(()) };
+            output.extend(segments.into_iter().map(|segment| match segment {
+                OutputSegment::Input(bytes) | OutputSegment::Replacement(bytes) => bytes,
+            }));
+            let actual = output.iter().flat_map(|bytes| bytes.iter().copied()).collect::<Vec<_>>();
+            prop_assert_eq!(actual, expected.as_bytes());
+        }
+
+        #[test]
+        fn fragmented_done_marker_has_one_ordered_receipt(input in any::<Vec<u8>>()) {
+            prop_assume!(!input
+                .windows(SSE_DONE_MARKER.len())
+                .any(|window| window == SSE_DONE_MARKER));
+            let key = SigningKey::from_bytes(&[9u8; 32]);
+            let mut detector = DoneDetector::default();
+            let mut hasher = blake3::Hasher::new();
+            let mut events = Vec::new();
+            let mut payload = input.clone();
+            payload.extend_from_slice(SSE_DONE_MARKER);
+            for byte in payload {
+                events.extend(detector.inspect(Bytes::from(vec![byte]), &key, &mut hasher));
+            }
+            let audits = events.iter().filter(|event| matches!(event, StreamEvent::AuditReceipt(_))).count();
+            let dones = events.iter().filter(|event| matches!(event, StreamEvent::DoneMarker(_))).count();
+            prop_assert_eq!(audits, 1);
+            prop_assert_eq!(dones, 1);
+            let audit_index = events.iter().position(|event| matches!(event, StreamEvent::AuditReceipt(_))).unwrap();
+            let done_index = events.iter().position(|event| matches!(event, StreamEvent::DoneMarker(_))).unwrap();
+            prop_assert!(audit_index < done_index);
+
+            let mut rebuilt = Vec::new();
+            let mut payload = Vec::new();
+            for event in &events {
+                match event {
+                    StreamEvent::Data(bytes) => {
+                        payload.extend_from_slice(bytes);
+                        rebuilt.extend_from_slice(bytes);
+                    }
+                    StreamEvent::AuditReceipt(_) => {}
+                    StreamEvent::DoneMarker(bytes) => rebuilt.extend_from_slice(bytes),
+                }
+            }
+            prop_assert!(rebuilt.ends_with(SSE_DONE_MARKER));
+            prop_assert_eq!(&payload, &input);
+            prop_assert_eq!(blake3::hash(&payload), blake3::hash(&rebuilt[..rebuilt.len() - SSE_DONE_MARKER.len()]));
+        }
+    }
+}
+
 pub fn active_sse_streams() -> usize {
     ACTIVE_SSE_STREAMS.load(Ordering::Relaxed)
 }

@@ -55,15 +55,18 @@ cargo clippy --workspace -- -D warnings
 
 A docker-compose stack is provided to quickly run the mock upstream server, the proxy (built from the `Dockerfile`), Prometheus, and Grafana.
 
-Start the observability stack:
+Start the observability stack with Prometheus and Grafana automatically:
 
 ```bash
 # Build images and start services in detached mode
 docker-compose up -d --build
 ```
 
+Compose requires `proxy-auth.txt` with one valid token per line and a `PROXY_PRIVATE_KEY` environment variable containing a 32-byte hex or base64 seed.
+
 - Mock upstream (Mock SSE generator): http://localhost:8081
-- Proxy and Prometheus metrics: http://localhost:3000/ and http://localhost:3000/metrics
+- Proxy: http://localhost:3000/
+- Internal health and metrics: http://localhost:9090/health and http://localhost:9090/metrics
 - Prometheus UI: http://localhost:9091 (scraped proxy metrics)
 - Grafana UI: http://localhost:3001 (anonymous access enabled)
 
@@ -72,6 +75,8 @@ Run the k6 load test to exercise 100 concurrent SSE streams for 30s:
 ```bash
 k6 run tests/redteam/load_test.js
 ```
+
+The proxy endpoint is port `3000`; health and Prometheus metrics are internal-only on port `9090`.
 
 Open Prometheus at http://localhost:9091 and Grafana at http://localhost:3001 to monitor the metrics in real-time. Useful metrics:
 
@@ -84,7 +89,7 @@ The red-team fixtures and k6 scenarios live under `tests/redteam/`.
 ## Production Packaging
 
 The included `Dockerfile` is a multi-stage build that:
-1. Uses `rust:1.88-alpine` to compile a statically-linked `x86_64-unknown-linux-musl` binary.
+1. Uses `rust:1.98.0-alpine3.24` to compile a statically-linked `x86_64-unknown-linux-musl` binary.
 2. Uses `gcr.io/distroless/static-debian12:nonroot` as the runtime image and copies the statically-linked binary into it.
 
 Build locally (for testing):
@@ -96,7 +101,7 @@ docker build -t zero-copy-pii-proxy:latest .
 Run the container:
 
 ```bash
-docker run -e PROXY_API_KEY=change_me_in_production -p 3000:3000 zero-copy-pii-proxy:latest
+docker run -e PROXY_AUTH_FILE=/run/secrets/proxy-auth -e PROXY_PRIVATE_KEY=<32-byte-seed> -p 3000:3000 -p 9090:9090 zero-copy-pii-proxy:latest
 ```
 
 Notes:
@@ -109,7 +114,7 @@ Notes:
 
 - Docker image is large or fails to run: ensure the binary is statically linked (check `ldd` on the binary in the builder stage), and that the distroless image has required files (certificates are baked into the binary via the system TLS stack; if TLS fails, consider adding CA certs at runtime).
 
-- Metrics not visible in Prometheus: confirm `prometheus.yml` points to `proxy:3000` and query `/metrics` on the proxy.
+- Metrics not visible in Prometheus: confirm `prometheus.yml` points to `proxy:9090` and query `/metrics` on the internal listener.
 
 
 ## Contact

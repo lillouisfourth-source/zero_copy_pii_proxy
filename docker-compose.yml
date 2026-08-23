@@ -15,10 +15,14 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
+      - "9090:9090"
     environment:
       - RUST_LOG=info
-      - PROXY_API_KEY=test_key
+      - PROXY_AUTH_FILE=/run/secrets/proxy-auth
+      - PROXY_PRIVATE_KEY=${PROXY_PRIVATE_KEY:?set PROXY_PRIVATE_KEY to a 32-byte hex or base64 seed}
       - UPSTREAM_API_URL=http://mock-upstream:8081
+    secrets:
+      - proxy-auth
     depends_on:
       - mock-upstream
 
@@ -43,3 +47,7 @@ services:
       - ./grafana-provisioning/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+
+secrets:
+  proxy-auth:
+    file: ./proxy-auth.txt

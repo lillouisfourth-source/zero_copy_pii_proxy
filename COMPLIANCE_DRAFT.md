@@ -36,7 +36,7 @@ GitHub Actions in the CI workflow are pinned to the exact 40-character commit SH
 
 Docker and service images are pinned by registry manifest digest using `name:tag@sha256:<digest>` where tags are retained for human readability. This includes the Rust builder and distroless runtime images, the CI Node and k6 test images, and the Compose Prometheus and Grafana services. Runner operating-system labels remain normal GitHub-hosted labels because they are workflow scheduling labels, not mutable action references.
 
-These controls prevent tag movement or upstream replacement from silently changing the build inputs. Combined with lockfiles, vulnerability scanning, SBOM generation, reproducible build inputs, and the tested workflow, they provide a verifiable supply-chain baseline for enterprise audit.
+These controls prevent tag movement or upstream replacement from silently changing the build inputs. Combined with lockfiles, vulnerability scanning, SBOM generation, reproducible build inputs, and the tested workflow, they provide a verifiable supply-chain baseline for enterprise audit. Authentication requires the Secret-projected `PROXY_AUTH_FILE` digest keyring; no `PROXY_API_KEY` fallback is supported.
 
 ## Verification Status
 

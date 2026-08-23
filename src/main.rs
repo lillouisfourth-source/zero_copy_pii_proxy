@@ -80,12 +80,11 @@ async fn main() {
             panic!("PROXY_PRIVATE_KEY must be configured as a valid 32-byte hex or base64 seed")
         });
 
-    let auth_file = std::env::var("PROXY_AUTH_FILE").ok().map(PathBuf::from);
-    let auth_source = auth_file
-        .as_ref()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .or_else(|| std::env::var("PROXY_API_KEY").ok())
-        .unwrap_or_else(|| panic!("PROXY_AUTH_FILE or PROXY_API_KEY must be configured"));
+    let auth_file = std::env::var("PROXY_AUTH_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be configured"));
+    let auth_source = std::fs::read_to_string(&auth_file)
+        .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be readable"));
     let auth_keyring = Arc::new(ArcSwap::new(Arc::new(hash_keyring(&auth_source))));
 
     let client = Client::builder()
@@ -101,10 +100,9 @@ async fn main() {
             watch_pii_config(&watch_path, watch_vault);
         });
     }
-    if let Some(auth_path) = auth_file {
-        let watch_keyring = auth_keyring.clone();
-        tokio::task::spawn_blocking(move || watch_auth_file(&auth_path, watch_keyring));
-    }
+    let watch_keyring = auth_keyring.clone();
+    let watch_auth_path = auth_file.clone();
+    tokio::task::spawn_blocking(move || watch_auth_file(&watch_auth_path, watch_keyring));
 
     let metrics_app = make_metrics_router(prometheus_handle.clone());
     let app = make_router(AppState {

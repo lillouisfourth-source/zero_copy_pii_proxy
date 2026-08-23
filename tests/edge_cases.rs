@@ -178,7 +178,7 @@ async fn rejects_payloads_larger_than_two_megabytes() {
 fn binary_refuses_to_start_without_proxy_api_key() {
     let binary = env!("CARGO_BIN_EXE_zero_copy_pii_proxy");
     let output = std::process::Command::new(binary)
-        .env_remove("PROXY_API_KEY")
+        .env_remove("PROXY_AUTH_FILE")
         .env_remove("PROXY_PORT")
         .output()
         .expect("execute proxy binary");
