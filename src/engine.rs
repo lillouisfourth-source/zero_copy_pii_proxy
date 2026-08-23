@@ -4,7 +4,6 @@ use serde_json;
 use std::str::Utf8Error;
 
 const DEFAULT_MAX_BUFFER_CAPACITY: usize = 64 * 1024;
-static REDACTED_BYTES: &[u8] = b"[REDACTED]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputSegment {
@@ -24,7 +23,8 @@ pub struct PiiVault {
     pub searcher: AhoCorasick,
     pub max_pattern_len: usize,
     pub patterns: Vec<String>,
-    pub replacements: Vec<String>,
+    pub replacements: Vec<Bytes>,
+    pub replacement_strings: Vec<String>,
     pub escaped_replacements: Vec<String>,
 }
 
@@ -32,7 +32,6 @@ pub struct StreamRedactor<'a> {
     vault: &'a PiiVault,
     pending: BytesMut,
     max_capacity: usize,
-    replacement: Bytes,
 }
 
 impl<'a> StreamRedactor<'a> {
@@ -49,7 +48,6 @@ impl<'a> StreamRedactor<'a> {
             vault,
             pending: BytesMut::new(),
             max_capacity,
-            replacement: Bytes::from_static(REDACTED_BYTES),
         }
     }
 
@@ -119,7 +117,9 @@ impl<'a> StreamRedactor<'a> {
             if mat.start() > last {
                 output.push(OutputSegment::Input(source.slice(last..mat.start())));
             }
-            output.push(OutputSegment::Replacement(self.replacement.clone()));
+            output.push(OutputSegment::Replacement(
+                self.vault.replacements[mat.pattern()].clone(),
+            ));
             last = mat.end();
         }
         if last < safe_len {
@@ -141,9 +141,13 @@ impl PiiVault {
             "patterns and replacements length mismatch"
         );
         let searcher = AhoCorasick::new(patterns).expect("failed to build aho-corasick automaton");
-        let replacements_vec = replacements
+        let replacement_strings = replacements
             .iter()
             .map(|value| (*value).to_string())
+            .collect::<Vec<_>>();
+        let replacements_bytes = replacement_strings
+            .iter()
+            .map(|value| Bytes::copy_from_slice(value.as_bytes()))
             .collect::<Vec<_>>();
         let escaped_replacements_vec = replacements
             .iter()
@@ -167,7 +171,8 @@ impl PiiVault {
                 .iter()
                 .map(|pattern| (*pattern).to_string())
                 .collect(),
-            replacements: replacements_vec,
+            replacements: replacements_bytes,
+            replacement_strings,
             escaped_replacements: escaped_replacements_vec,
         }
     }
@@ -182,7 +187,7 @@ pub fn redact_text<'a>(text: &'a str, vault: &PiiVault) -> std::borrow::Cow<'a, 
     for mat in vault.searcher.find_iter(text) {
         if mat.start() >= last {
             output.push_str(&text[last..mat.start()]);
-            output.push_str(&vault.replacements[mat.pattern()]);
+            output.push_str(&vault.replacement_strings[mat.pattern()]);
             last = mat.end();
         }
     }

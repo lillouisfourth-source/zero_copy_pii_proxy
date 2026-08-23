@@ -9,6 +9,24 @@ service:
   type: ClusterIP
   port: 3000
 
+terminationGracePeriodSeconds: 120
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  capabilities:
+    drop:
+      - ALL
+
 resources:
   requests:
     cpu: 50m
@@ -26,8 +44,17 @@ probes:
     periodSeconds: 5
 
 config:
+  proxyPort: 3000
   upstreamApiUrl: https://api.openai.com/v1/chat/completions
   allowedOrigins: https://app.example.com
+  piiPatterns: "password,secret,ssn"
+  piiConfigMap: ""
+  shutdownTimeoutSec: 110
+
+networkPolicy:
+  enabled: true
+  egressCidrs: []
 
 secrets:
   apiKey: replace-me
+  proxyPrivateKey: ""

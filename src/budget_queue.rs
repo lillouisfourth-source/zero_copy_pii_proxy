@@ -3,9 +3,14 @@ use http_body::{Body, Frame, SizeHint};
 use std::{
     convert::Infallible,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
+
+static PROXY_BYTE_BUDGET_IN_USE: AtomicUsize = AtomicUsize::new(0);
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Clone)]
@@ -56,14 +61,31 @@ pub struct BudgetedSegment {
     permit: OwnedSemaphorePermit,
 }
 
+fn record_budget_in_use(delta: isize) {
+    let current = if delta.is_positive() {
+        PROXY_BYTE_BUDGET_IN_USE.fetch_add(delta as usize, Ordering::Relaxed) + delta as usize
+    } else {
+        PROXY_BYTE_BUDGET_IN_USE.fetch_sub(delta.unsigned_abs(), Ordering::Relaxed)
+            - delta.unsigned_abs()
+    };
+    metrics::gauge!("proxy_byte_budget_in_use", current as f64);
+}
+
 impl BudgetedSegment {
     pub async fn reserve(budget: &ByteBudget, bytes: Bytes) -> Option<Self> {
         let permit = budget.reserve(bytes.len()).await?;
+        record_budget_in_use(bytes.len() as isize);
         Some(Self { bytes, permit })
     }
 
     pub fn permit_count(&self) -> usize {
         self.permit.num_permits()
+    }
+}
+
+impl Drop for BudgetedSegment {
+    fn drop(&mut self) {
+        record_budget_in_use(-(self.permit.num_permits() as isize));
     }
 }
 

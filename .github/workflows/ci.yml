@@ -40,42 +40,137 @@ jobs:
           fetch-depth: 0
       - name: Build Docker Image
         run: docker build -t zero-copy-pii-proxy:test .
+      - name: Set up kind cluster
+        uses: helm/kind-action@v1.12.0
+      - name: Load image into kind
+        run: kind load docker-image zero-copy-pii-proxy:test --name chart-testing
       - name: Install Helm
-        uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+        uses: azure/setup-helm@v4.2.4
+        with:
+          version: '4.2.4'
       - name: Validate Helm chart
         run: helm lint charts/zero-copy-pii-proxy
-      - name: Start k6 test target
+      - name: Deploy deterministic fragmented upstream mock
         shell: bash
         run: |
-          docker network create pii-ci
-          docker run -d --name pii-ci-mock --network pii-ci \
-            -v "$GITHUB_WORKSPACE/mock_upstream.js:/app/mock_upstream.js:ro" \
-            node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 node /app/mock_upstream.js
-          docker run -d --name pii-ci-proxy --network pii-ci -p 3000:3000 \
-            -e PROXY_API_KEY=test_key \
-            -e UPSTREAM_API_URL=http://pii-ci-mock:8081 \
-            zero-copy-pii-proxy:test
+          kubectl apply -f - <<'YAML'
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: pii-mock-script
+          data:
+            server.py: |
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+              import socket
+              import time
+
+              class Handler(BaseHTTPRequestHandler):
+                  def do_POST(self):
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/event-stream")
+                      self.send_header("Cache-Control", "no-cache")
+                      self.end_headers()
+                      self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                      payload = b'data: {"choices":[{"delta":{"content":"safe password"}}]}\n\n'
+                      for byte in payload:
+                          self.wfile.write(bytes((byte,)))
+                          self.wfile.flush()
+                      for byte in b'data: [DONE]\n\n':
+                          self.wfile.write(bytes((byte,)))
+                          self.wfile.flush()
+                          time.sleep(0.002)
+
+                  def log_message(self, format, *args):
+                      return
+
+              HTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: pii-mock
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: pii-mock
+            template:
+              metadata:
+                labels:
+                  app: pii-mock
+              spec:
+                containers:
+                  - name: mock
+                    image: python:3.12-alpine@sha256:285a71327884a4d50efbea30104473b0fa43ecefa499458899670ca30dae76e5
+                    command: ["python", "/opt/mock/server.py"]
+                    ports:
+                      - containerPort: 8081
+                    volumeMounts:
+                      - name: script
+                        mountPath: /opt/mock
+                        readOnly: true
+                volumes:
+                  - name: script
+                    configMap:
+                      name: pii-mock-script
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: pii-mock
+          spec:
+            selector:
+              app: pii-mock
+            ports:
+              - port: 443
+                targetPort: 8081
+          YAML
+          kubectl rollout status deployment/pii-mock --timeout=90s
+      - name: Deploy chart in hostile kind environment
+        run: |
+          helm upgrade --install zero-copy-pii-proxy ./charts/zero-copy-pii-proxy \
+            --set image.repository=zero-copy-pii-proxy \
+            --set image.tag=test \
+            --set config.upstreamApiUrl=http://pii-mock:443 \
+            --set secrets.apiKey=ci-test-key \
+            --set-string secrets.proxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
+            --set podSecurityContext.runAsNonRoot=true \
+            --set containerSecurityContext.readOnlyRootFilesystem=true \
+            --set containerSecurityContext.allowPrivilegeEscalation=false \
+            --set containerSecurityContext.capabilities.drop[0]=ALL
+      - name: Wait for deployment readiness
+        run: kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=zero-copy-pii-proxy --timeout=90s
+      - name: Port-forward Helm deployment
+        shell: bash
+        run: |
+          kubectl port-forward deployment/zero-copy-pii-proxy 3000:3000 9090:9090 > port-forward.log 2>&1 &
           for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:3000/health; then
+            if curl --fail --silent http://127.0.0.1:9090/health; then
               exit 0
             fi
             sleep 1
           done
-          docker logs pii-ci-proxy
+          cat port-forward.log
           exit 1
       - name: Run k6 load test
         run: |
-          docker run --network pii-ci \
+          docker run --network host \
             -v ${{ github.workspace }}:/scripts \
-            -e TARGET_URL=http://pii-ci-proxy:3000/v1/chat/completions \
+            -e TARGET_URL=http://127.0.0.1:3000/v1/chat/completions \
             grafana/k6:0.49.0@sha256:8cd78f9d0de5f50bc8821cceecf356d5d9e839e6611c226a3fcf13c591080fbd run /scripts/tests/redteam/load_test.js
+      - name: Verify fragmented SSE receipt end to end
+        shell: bash
+        run: |
+          python -m pip install blake3 cryptography
+          python scripts/verify_e2e.py \
+            --url http://127.0.0.1:3000/v1/chat/completions \
+            --api-key ci-test-key \
+            --public-key O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=
       - name: Stop k6 test target
         if: always()
         shell: bash
         run: |
-          docker logs pii-ci-proxy || true
-          docker rm -f pii-ci-proxy pii-ci-mock || true
-          docker network rm pii-ci || true
+          pkill -f "kubectl port-forward deployment/zero-copy-pii-proxy" || true
       - name: Scan Docker Image for Vulnerabilities
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:

@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 use zero_copy_pii_proxy::engine::PiiVault;
-use zero_copy_pii_proxy::{make_router, AppState};
+use zero_copy_pii_proxy::{make_metrics_router, make_router, AppState};
 
 #[tokio::test]
 async fn drop_guard_prevents_leak_of_active_sse_streams() {
@@ -19,7 +19,10 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
     // Build a simple vault
     let patterns = ["password", "secret"];
     let replacements = ["[REDACTED]", "[REDACTED]"];
-    let vault = Arc::new(PiiVault::new(&patterns, &replacements));
+    let vault = Arc::new(arc_swap::ArcSwap::from_pointee(PiiVault::new(
+        &patterns,
+        &replacements,
+    )));
 
     // Start a tiny upstream server that streams a single SSE chunk and then sleeps briefly
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -50,14 +53,22 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
         api_key: api_key.clone(),
         upstream_url,
         allowed_origins: Vec::new(),
-        prometheus_handle,
+        prometheus_handle: prometheus_handle.clone(),
         byte_budget: Arc::new(Semaphore::new(2 * 1024 * 1024)),
+        proxy_private_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+        shutdown: tokio::sync::watch::channel(false).1,
     });
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
+    let metrics_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let metrics_addr = metrics_listener.local_addr().unwrap();
+    let metrics_router = make_metrics_router(prometheus_handle.clone());
     tokio::spawn(async move {
         axum::serve(proxy_listener, router).await.unwrap();
+    });
+    tokio::spawn(async move {
+        axum::serve(metrics_listener, metrics_router).await.unwrap();
     });
 
     // Create a client and POST to proxy with stream:true and Authorization header
@@ -86,7 +97,7 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
 
     // Now poll /metrics and assert active_sse_streams 0
     let metrics = client
-        .get(format!("http://{}/metrics", proxy_addr))
+        .get(format!("http://{}/metrics", metrics_addr))
         .send()
         .await
         .expect("metrics")

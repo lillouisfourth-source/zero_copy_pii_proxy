@@ -1,5 +1,5 @@
 # Stage 1: builder
-FROM rust:1.88-alpine@sha256:9dfaae478ecd298b6b5a039e1f2cc4fc040fc818a2de9aa78fa714dea036574d AS builder
+FROM rust:1.98.0-alpine3.24@sha256:a10e64dd139b7387337c7fbe8aca31b959b57b2fd4c8ae20a02cf1d6ea424dce AS builder
 
 # Install packages needed for musl static linking
 RUN apk add --no-cache musl-dev build-base curl git
@@ -23,6 +23,7 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:1b7b9f0f0e0a1d2155f531db58
 # Copy the statically linked binary from the builder stage
 COPY --from=builder /usr/src/app/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy /usr/local/bin/zero_copy_pii_proxy
 
+USER 10001
 EXPOSE 3000
 
 ENTRYPOINT ["/usr/local/bin/zero_copy_pii_proxy"]

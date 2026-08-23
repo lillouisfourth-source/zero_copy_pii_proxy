@@ -6,6 +6,8 @@ metadata:
     {{- include "zero-copy-pii-proxy.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 8 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "zero-copy-pii-proxy.name" . }}
@@ -16,11 +18,19 @@ spec:
         app.kubernetes.io/name: {{ include "zero-copy-pii-proxy.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       containers:
         - name: proxy
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           env:
+            - name: PROXY_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-config
+                  key: PROXY_PORT
             - name: UPSTREAM_API_URL
               valueFrom:
                 configMapKeyRef:
@@ -31,25 +41,57 @@ spec:
                 configMapKeyRef:
                   name: {{ include "zero-copy-pii-proxy.fullname" . }}-config
                   key: ALLOWED_ORIGINS
+            - name: PII_PATTERNS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-config
+                  key: PII_PATTERNS
+            - name: SHUTDOWN_TIMEOUT_SEC
+              value: {{ .Values.config.shutdownTimeoutSec | quote }}
+            {{- if .Values.config.piiConfigMap }}
+            - name: PII_CONFIG_PATH
+              value: /etc/zero-copy-pii-proxy/PII_PATTERNS
+            {{- end }}
             - name: PROXY_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
                   key: PROXY_API_KEY
+            {{- if .Values.secrets.proxyPrivateKey }}
+            - name: PROXY_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
+                  key: PROXY_PRIVATE_KEY
+            {{- end }}
+          {{- if .Values.config.piiConfigMap }}
+          volumeMounts:
+            - name: pii-config
+              mountPath: /etc/zero-copy-pii-proxy
+              readOnly: true
+          {{- end }}
           ports:
             - name: http
-              containerPort: 3000
+              containerPort: {{ .Values.config.proxyPort }}
+            - name: metrics
+              containerPort: 9090
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
           readinessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+      {{- if .Values.config.piiConfigMap }}
+      volumes:
+        - name: pii-config
+          configMap:
+            name: {{ .Values.config.piiConfigMap }}
+      {{- end }}

@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use zero_copy_pii_proxy::engine::PiiVault;
-use zero_copy_pii_proxy::{make_router, AppState};
+use zero_copy_pii_proxy::{make_metrics_router, make_router, AppState};
 
 static METRICS_HANDLE: OnceLock<Arc<metrics_exporter_prometheus::PrometheusHandle>> =
     OnceLock::new();
@@ -25,8 +25,11 @@ fn metrics_handle() -> Arc<metrics_exporter_prometheus::PrometheusHandle> {
         .clone()
 }
 
-async fn start_proxy(upstream_url: String) -> (String, tokio::task::JoinHandle<()>) {
-    let vault = Arc::new(PiiVault::new(&["password"], &["[REDACTED]"]));
+async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::JoinHandle<()>) {
+    let vault = Arc::new(arc_swap::ArcSwap::from_pointee(PiiVault::new(
+        &["password"],
+        &["[REDACTED]"],
+    )));
     let router = make_router(AppState {
         client: Client::builder().build().expect("client"),
         vault,
@@ -35,13 +38,29 @@ async fn start_proxy(upstream_url: String) -> (String, tokio::task::JoinHandle<(
         allowed_origins: Vec::new(),
         prometheus_handle: metrics_handle(),
         byte_budget: Arc::new(Semaphore::new(2 * 1024 * 1024)),
+        proxy_private_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+        shutdown: tokio::sync::watch::channel(false).1,
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy bind");
     let address = listener.local_addr().expect("proxy address");
+    let metrics_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("metrics bind");
+    let metrics_address = metrics_listener.local_addr().expect("metrics address");
+    let metrics_router = make_metrics_router(metrics_handle());
     let task = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("proxy server");
     });
-    (format!("http://{address}"), task)
+    tokio::spawn(async move {
+        axum::serve(metrics_listener, metrics_router)
+            .await
+            .expect("metrics server");
+    });
+    (
+        format!("http://{address}"),
+        format!("http://{metrics_address}"),
+        task,
+    )
 }
 
 async fn post_proxy(client: &Client, proxy_url: &str) -> reqwest::Response {
@@ -77,7 +96,8 @@ async fn propagates_upstream_429_body_retry_after_and_metrics() {
             .expect("upstream server");
     });
 
-    let (proxy_url, proxy_task) = start_proxy(format!("http://{upstream_address}")).await;
+    let (proxy_url, metrics_url, proxy_task) =
+        start_proxy(format!("http://{upstream_address}")).await;
     let client = Client::new();
     let response = post_proxy(&client, &proxy_url).await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -88,7 +108,7 @@ async fn propagates_upstream_429_body_retry_after_and_metrics() {
     );
 
     let metrics = client
-        .get(format!("{proxy_url}/metrics"))
+        .get(format!("{metrics_url}/metrics"))
         .send()
         .await
         .expect("metrics request")
@@ -110,13 +130,14 @@ async fn upstream_connection_failure_returns_502_and_gateway_metric() {
     let unused_address = unused_listener.local_addr().expect("unused address");
     drop(unused_listener);
 
-    let (proxy_url, proxy_task) = start_proxy(format!("http://{unused_address}")).await;
+    let (proxy_url, metrics_url, proxy_task) =
+        start_proxy(format!("http://{unused_address}")).await;
     let client = Client::new();
     let response = post_proxy(&client, &proxy_url).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
     let metrics = client
-        .get(format!("{proxy_url}/metrics"))
+        .get(format!("{metrics_url}/metrics"))
         .send()
         .await
         .expect("metrics request")
@@ -131,7 +152,7 @@ async fn upstream_connection_failure_returns_502_and_gateway_metric() {
 
 #[tokio::test]
 async fn rejects_payloads_larger_than_two_megabytes() {
-    let (proxy_url, proxy_task) = start_proxy("http://127.0.0.1:9".to_string()).await;
+    let (proxy_url, _, proxy_task) = start_proxy("http://127.0.0.1:9".to_string()).await;
     let client = Client::new();
     let oversized_body = vec![b'x'; 2 * 1024 * 1024 + 512 * 1024];
     let response = client

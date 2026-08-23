@@ -5,5 +5,7 @@ metadata:
   labels:
     {{- include "zero-copy-pii-proxy.labels" . | nindent 4 }}
 data:
+  PROXY_PORT: {{ .Values.config.proxyPort | quote }}
   UPSTREAM_API_URL: {{ .Values.config.upstreamApiUrl | quote }}
   ALLOWED_ORIGINS: {{ .Values.config.allowedOrigins | quote }}
+  PII_PATTERNS: {{ .Values.config.piiPatterns | quote }}
