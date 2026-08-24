@@ -24,6 +24,7 @@ export default function () {
   });
 
   const params = {
+    timeout: '2s',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer test_key', 
