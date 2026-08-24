@@ -132,7 +132,7 @@ jobs:
             --set image.repository=zero-copy-pii-proxy \
             --set image.tag=test \
             --set config.upstreamApiUrl=http://pii-mock:443 \
-            --set-string secrets.authTokens=ci-test-key \
+            --set-string secrets.authTokens=test_key \
             --set-string secrets.proxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
             --set podSecurityContext.runAsNonRoot=true \
             --set containerSecurityContext.readOnlyRootFilesystem=true \
@@ -164,7 +164,7 @@ jobs:
           python -m pip install blake3 cryptography
           python scripts/verify_e2e.py \
             --url http://127.0.0.1:3000/v1/chat/completions \
-            --api-key ci-test-key \
+            --api-key test_key \
             --public-key O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=
       - name: Stop k6 test target
         if: always()
