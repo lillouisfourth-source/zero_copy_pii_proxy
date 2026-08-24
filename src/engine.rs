@@ -68,7 +68,9 @@ impl SseScanner {
             if offset < prefix_len + probe_len {
                 let payload_probe_end = (prefix_len + probe_len).min(chunk.len());
                 let chunk_offset = offset.saturating_sub(prefix_len);
-                events.push(SseSegment::Payload(chunk.slice(chunk_offset..payload_probe_end)));
+                events.push(SseSegment::Payload(
+                    chunk.slice(chunk_offset..payload_probe_end),
+                ));
             }
             if probe_len < chunk.len() {
                 events.push(SseSegment::Payload(chunk.slice(probe_len..)));

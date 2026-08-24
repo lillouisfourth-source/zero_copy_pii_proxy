@@ -45,7 +45,7 @@ jobs:
       - name: Load image into kind
         run: kind load docker-image zero-copy-pii-proxy:test --name chart-testing
       - name: Install Helm
-        uses: azure/setup-helm@v4.2.4
+        uses: azure/setup-helm@v4
         with:
           version: '4.2.4'
       - name: Validate Helm chart
