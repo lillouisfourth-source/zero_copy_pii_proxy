@@ -3,7 +3,7 @@
 on:
   workflow_dispatch:
   push:
-    branches: [ "master", "main" ]
+    branches: [ "master", "main", "hardening/phase-12-zero-copy" ]
   pull_request:
     branches: [ "master", "main" ]
 
@@ -209,5 +209,5 @@ jobs:
         run: cargo install cargo-fuzz --version 0.13.2
       - name: Run redaction and receipt fuzz target
         working-directory: fuzz
-        run: cargo fuzz run fuzz_target_1 -- -max_total_time=60
+        run: cargo fuzz run fuzz_target_1 -- -runs=10000
 

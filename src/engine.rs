@@ -11,6 +11,91 @@ pub enum OutputSegment {
     Replacement(Bytes),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SseSegment {
+    Framing(Bytes),
+    Payload(Bytes),
+}
+
+pub struct SseScanner {
+    prefix: BytesMut,
+    in_payload: bool,
+}
+
+impl Default for SseScanner {
+    fn default() -> Self {
+        Self {
+            prefix: BytesMut::new(),
+            in_payload: false,
+        }
+    }
+}
+
+impl SseScanner {
+    pub fn scan(&mut self, chunk: Bytes) -> Vec<SseSegment> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+        if self.in_payload {
+            if let Some(end) = chunk.iter().position(|byte| *byte == b'\n') {
+                self.in_payload = false;
+                return vec![
+                    SseSegment::Payload(chunk.slice(..end)),
+                    SseSegment::Framing(chunk.slice(end..)),
+                ];
+            }
+            return vec![SseSegment::Payload(chunk)];
+        }
+
+        let marker = b"data: ";
+        let probe_len = chunk.len().min(marker.len() - 1);
+        let mut probe = [0u8; 12];
+        let prefix_len = self.prefix.len();
+        probe[..prefix_len].copy_from_slice(&self.prefix);
+        probe[prefix_len..prefix_len + probe_len].copy_from_slice(&chunk[..probe_len]);
+        if let Some(start) = probe[..prefix_len + probe_len]
+            .windows(marker.len())
+            .position(|window| window == marker)
+        {
+            self.prefix.clear();
+            self.in_payload = true;
+            let offset = start + marker.len();
+            let mut events = Vec::new();
+            if start > 0 {
+                events.push(SseSegment::Framing(Bytes::copy_from_slice(&probe[..start])));
+            }
+            events.push(SseSegment::Framing(Bytes::copy_from_slice(marker)));
+            if offset < prefix_len + probe_len {
+                let payload_probe_end = (prefix_len + probe_len).min(chunk.len());
+                let chunk_offset = offset.saturating_sub(prefix_len);
+                events.push(SseSegment::Payload(chunk.slice(chunk_offset..payload_probe_end)));
+            }
+            if probe_len < chunk.len() {
+                events.push(SseSegment::Payload(chunk.slice(probe_len..)));
+            }
+            return events;
+        }
+
+        let retain_len = marker.len() - 1;
+        if chunk.len() <= retain_len {
+            self.prefix.extend_from_slice(&chunk);
+            return Vec::new();
+        }
+        let emit_len = chunk.len() - retain_len;
+        self.prefix.clear();
+        self.prefix.extend_from_slice(&chunk[emit_len..]);
+        vec![SseSegment::Framing(chunk.slice(..emit_len))]
+    }
+
+    pub fn finish(&mut self) -> Vec<SseSegment> {
+        if self.prefix.is_empty() {
+            Vec::new()
+        } else {
+            vec![SseSegment::Framing(self.prefix.split().freeze())]
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum StreamRedactionError {
     BufferLimitExceeded,

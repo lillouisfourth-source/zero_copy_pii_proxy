@@ -8,7 +8,6 @@ use reqwest::Client;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
 use zero_copy_pii_proxy::engine::PiiVault;
 use zero_copy_pii_proxy::{make_metrics_router, make_router, AppState};
 
@@ -40,7 +39,6 @@ async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::Join
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle: metrics_handle(),
-        byte_budget: Arc::new(Semaphore::new(2 * 1024 * 1024)),
         proxy_private_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         shutdown: tokio::sync::watch::channel(false).1,
     });

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use zeroize::Zeroize;
 
 use arc_swap::ArcSwap;
 use base64::Engine;
@@ -11,7 +12,6 @@ use dotenvy::dotenv;
 use ed25519_dalek::SigningKey;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
-use tokio::sync::Semaphore;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::ServiceBuilder;
 
@@ -83,9 +83,10 @@ async fn main() {
     let auth_file = std::env::var("PROXY_AUTH_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be configured"));
-    let auth_source = std::fs::read_to_string(&auth_file)
+    let mut auth_source = std::fs::read_to_string(&auth_file)
         .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be readable"));
     let auth_keyring = Arc::new(ArcSwap::new(Arc::new(hash_keyring(&auth_source))));
+    auth_source.zeroize();
 
     let client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(90))
@@ -112,7 +113,6 @@ async fn main() {
         upstream_url,
         allowed_origins,
         prometheus_handle,
-        byte_budget: Arc::new(Semaphore::new(2 * 1024 * 1024)),
         proxy_private_key,
         shutdown: shutdown.clone(),
     });
@@ -196,8 +196,10 @@ fn watch_auth_file(path: &Path, keyring: Arc<ArcSwap<HashSet<[u8; 32]>>>) {
         }
         for delay in [100, 500, 1_000, 2_000] {
             match std::fs::read_to_string(path) {
-                Ok(contents) => {
-                    keyring.store(Arc::new(hash_keyring(&contents)));
+                Ok(mut contents) => {
+                    let next_keyring = Arc::new(hash_keyring(&contents));
+                    contents.zeroize();
+                    keyring.store(next_keyring);
                     break;
                 }
                 Err(_) => std::thread::sleep(Duration::from_millis(delay)),
@@ -283,7 +285,7 @@ fn watch_pii_config(config_path: &Path, vault: Arc<ArcSwap<PiiVault>>) {
                 Err(_) => std::thread::sleep(Duration::from_millis(delay)),
             }
         }
-        let Some(contents) = contents else {
+        let Some(mut contents) = contents else {
             tracing::error!(path = %config_path.display(), "PII config reload failed after retries; retaining previous vault");
             metrics::increment_counter!("pii_config_reload_errors_total");
             continue;
@@ -292,6 +294,7 @@ fn watch_pii_config(config_path: &Path, vault: Arc<ArcSwap<PiiVault>>) {
         let patterns_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
         let replacements_refs: Vec<&str> = replacements.iter().map(String::as_str).collect();
         let next_vault = Arc::new(PiiVault::new(&patterns_refs, &replacements_refs));
+        contents.zeroize();
         vault.store(next_vault);
         tracing::info!(path = %config_path.display(), "swapped PII vault after config update");
     }

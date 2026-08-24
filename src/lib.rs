@@ -80,7 +80,6 @@ pub struct AppState {
     pub upstream_url: String,
     pub allowed_origins: Vec<String>,
     pub prometheus_handle: Arc<PrometheusHandle>,
-    pub byte_budget: Arc<Semaphore>,
     pub proxy_private_key: SigningKey,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
@@ -171,11 +170,13 @@ pub fn active_sse_streams() -> usize {
 
 fn increment_active_sse_streams() {
     ACTIVE_SSE_STREAMS.fetch_add(1, Ordering::Relaxed);
+    metrics::gauge!("proxy_active_streams", active_sse_streams() as f64);
     metrics::gauge!("active_sse_streams", active_sse_streams() as f64);
 }
 
 fn decrement_active_sse_streams() {
     let current = ACTIVE_SSE_STREAMS.fetch_sub(1, Ordering::Relaxed) - 1;
+    metrics::gauge!("proxy_active_streams", current as f64);
     metrics::gauge!("active_sse_streams", current as f64);
 }
 
@@ -464,7 +465,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     }
     let (tx, rx) = channel(32);
     let tx_task = tx.clone();
-    let byte_budget = ByteBudget::from_shared(state.byte_budget.clone(), OUTPUT_BYTE_BUDGET);
+    let byte_budget = ByteBudget::new(OUTPUT_BYTE_BUDGET);
     let private_key = state.proxy_private_key.clone();
     let mut stream_shutdown = state.shutdown.clone();
     let active_vault = state.vault.load_full();
@@ -703,9 +704,13 @@ impl DoneDetector {
 
         let retain_len = marker_len - 1;
         if bytes.len() >= retain_len {
+            let held = if self.trailing.is_empty() {
+                None
+            } else {
+                Some(self.trailing.split().freeze())
+            };
             if !self.trailing.is_empty() {
-                let trailing = self.trailing.split().freeze();
-                hasher.update(&trailing);
+                hasher.update(held.as_ref().expect("held trailing bytes"));
             }
             let emit_len = bytes.len() - retain_len;
             let data = bytes.slice(..emit_len);
@@ -713,11 +718,14 @@ impl DoneDetector {
                 hasher.update(&data);
             }
             self.trailing.extend_from_slice(&bytes[emit_len..]);
-            if data.is_empty() {
-                Vec::new()
-            } else {
-                vec![StreamEvent::Data(data)]
+            let mut events = Vec::new();
+            if let Some(held) = held {
+                events.push(StreamEvent::Data(held));
             }
+            if !data.is_empty() {
+                events.push(StreamEvent::Data(data));
+            }
+            events
         } else {
             let mut held = BytesMut::with_capacity(self.trailing.len() + bytes.len());
             held.extend_from_slice(&self.trailing);

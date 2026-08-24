@@ -46,6 +46,7 @@ impl ByteBudget {
 
     pub async fn reserve(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
         if bytes == 0 || bytes > self.capacity || bytes > u32::MAX as usize {
+            metrics::increment_counter!("proxy_dropped_streams_capacity");
             return None;
         }
         self.semaphore
