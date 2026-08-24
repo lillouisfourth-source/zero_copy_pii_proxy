@@ -6,8 +6,6 @@ metadata:
     {{- include "zero-copy-pii-proxy.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
-  securityContext:
-    {{- toYaml .Values.podSecurityContext | nindent 8 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "zero-copy-pii-proxy.name" . }}
@@ -19,6 +17,8 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: proxy
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
