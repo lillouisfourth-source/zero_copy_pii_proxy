@@ -5,7 +5,7 @@ on:
   push:
     branches: [ "master", "main", "hardening/phase-12-zero-copy" ]
   pull_request:
-    branches: [ "master", "main" ]
+    branches: [ "master", "main", "hardening/*" ]
 
 env:
   CARGO_TERM_COLOR: always
