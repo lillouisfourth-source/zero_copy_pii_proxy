@@ -41,6 +41,7 @@ async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::Join
         prometheus_handle: metrics_handle(),
         proxy_private_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         shutdown: tokio::sync::watch::channel(false).1,
+        global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy bind");
     let address = listener.local_addr().expect("proxy address");

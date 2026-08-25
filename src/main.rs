@@ -115,6 +115,7 @@ async fn main() {
         prometheus_handle,
         proxy_private_key,
         shutdown: shutdown.clone(),
+        global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
     });
 
     // Bind to 0.0.0.0 so Docker/K8s can route to it

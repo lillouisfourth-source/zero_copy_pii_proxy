@@ -4,7 +4,9 @@ pub mod budget_queue;
 pub mod domain;
 pub mod engine;
 
-use crate::budget_queue::{channel, enqueue, BudgetedBody, ByteBudget};
+use crate::budget_queue::{
+    channel, enqueue, BudgetedBody, ByteBudget, EnqueueError, GLOBAL_MEMORY_CHUNK,
+};
 use crate::engine::{OutputSegment, PiiVault, StreamRedactor};
 use base64::engine::general_purpose::STANDARD as B64Std;
 use base64::Engine;
@@ -82,6 +84,7 @@ pub struct AppState {
     pub prometheus_handle: Arc<PrometheusHandle>,
     pub proxy_private_key: SigningKey,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
+    pub global_memory: Arc<Semaphore>,
 }
 
 pub const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
@@ -375,6 +378,24 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                 .unwrap();
         }
     };
+    let stream_memory_permit = match tokio::time::timeout(
+        Duration::from_secs(2),
+        state
+            .global_memory
+            .clone()
+            .acquire_many_owned(GLOBAL_MEMORY_CHUNK as u32),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            metrics::increment_counter!("proxy_memory_load_shed_total");
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("proxy memory capacity exhausted"))
+                .unwrap();
+        }
+    };
 
     let mut upstream_request = state.client.post(&state.upstream_url).body(request_body);
     if let Some(content_type) = request_content_type {
@@ -465,7 +486,8 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     }
     let (tx, rx) = channel(32);
     let tx_task = tx.clone();
-    let byte_budget = ByteBudget::new(OUTPUT_BYTE_BUDGET);
+    let byte_budget =
+        ByteBudget::from_global_shared(state.global_memory.clone(), OUTPUT_BYTE_BUDGET);
     let private_key = state.proxy_private_key.clone();
     let mut stream_shutdown = state.shutdown.clone();
     let active_vault = state.vault.load_full();
@@ -482,6 +504,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         }
         let _guard = ActiveStreamGuard { active_sse: is_sse };
         let _stream_permit = stream_permit;
+        let _stream_memory_permit = stream_memory_permit;
         let mut stream = upstream_response.bytes_stream();
         let mut redactor = StreamRedactor::new(active_vault.as_ref());
         let mut hasher = blake3::Hasher::new();
@@ -530,8 +553,11 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                                 }
                             } else {
                                 hasher.update(&bytes);
-                                if enqueue(&tx_task, &byte_budget, bytes).await.is_err() {
-                                    tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
+                                if enqueue_with_timeout(&tx_task, &byte_budget, bytes)
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::warn!("downstream enqueue failed or timed out; aborting upstream stream");
                                     return;
                                 }
                             }
@@ -567,8 +593,11 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                         }
                     } else {
                         hasher.update(&bytes);
-                        if enqueue(&tx_task, &byte_budget, bytes).await.is_err() {
-                            tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
+                        if enqueue_with_timeout(&tx_task, &byte_budget, bytes)
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!("downstream enqueue failed or timed out; aborting upstream stream");
                             return;
                         }
                     }
@@ -621,6 +650,23 @@ fn build_proxy_audit_frame(receipt: &str, signature: &str) -> Bytes {
     Bytes::copy_from_slice(body.as_bytes())
 }
 
+async fn enqueue_with_timeout(
+    sender: &crate::budget_queue::SegmentSender,
+    budget: &ByteBudget,
+    bytes: Bytes,
+) -> Result<(), EnqueueError> {
+    match tokio::time::timeout(Duration::from_secs(5), enqueue(sender, budget, bytes)).await {
+        Ok(result) => result,
+        Err(_) => {
+            metrics::increment_counter!("proxy_slowloris_guillotine_total");
+            tracing::warn!(
+                "DOWNSTREAM DEADLOCK DETECTED: Slowloris Guillotine triggered. Dropping stream."
+            );
+            Err(EnqueueError::Capacity)
+        }
+    }
+}
+
 async fn forward_stream_events(
     events: Vec<StreamEvent>,
     sender: &crate::budget_queue::SegmentSender,
@@ -632,7 +678,9 @@ async fn forward_stream_events(
             | StreamEvent::AuditReceipt(bytes)
             | StreamEvent::DoneMarker(bytes) => bytes,
         };
-        enqueue(sender, budget, bytes).await.map_err(|_| ())?;
+        enqueue_with_timeout(sender, budget, bytes)
+            .await
+            .map_err(|_| ())?;
     }
     Ok(())
 }
