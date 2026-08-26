@@ -87,6 +87,7 @@ fn record_budget_in_use(delta: isize) {
         PROXY_BYTE_BUDGET_IN_USE.fetch_sub(delta.unsigned_abs(), Ordering::Relaxed)
             - delta.unsigned_abs()
     };
+    metrics::gauge!("active_byte_budget_used", current as f64);
     metrics::gauge!("proxy_byte_budget_in_use", current as f64);
 }
 
@@ -104,6 +105,8 @@ impl BudgetedSegment {
         .ok()?;
         let local_permit = budget.reserve(bytes.len()).await?;
         record_budget_in_use(bytes.len() as isize);
+        metrics::gauge!("available_byte_budget", budget.available() as f64);
+        tracing::trace!(bytes = bytes.len(), "byte budget segment acquired");
         Some(Self {
             bytes,
             _global_permit: global_permit,
@@ -118,6 +121,7 @@ impl BudgetedSegment {
 
 impl Drop for BudgetedSegment {
     fn drop(&mut self) {
+        tracing::trace!(bytes = self.bytes.len(), "byte budget segment released");
         record_budget_in_use(-(self._local_permit.num_permits() as isize));
     }
 }
