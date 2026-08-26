@@ -16,6 +16,10 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 pub const GLOBAL_MEMORY_CHUNK: usize = 64 * 1024;
 pub const DEFAULT_GLOBAL_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
 
+pub fn byte_budget_in_use() -> usize {
+    PROXY_BYTE_BUDGET_IN_USE.load(Ordering::Relaxed)
+}
+
 #[derive(Clone)]
 pub struct ByteBudget {
     semaphore: Arc<Semaphore>,
