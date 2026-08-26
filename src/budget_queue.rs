@@ -88,16 +88,12 @@ fn record_budget_in_use(delta: isize) {
 
 impl BudgetedSegment {
     pub async fn reserve(budget: &ByteBudget, bytes: Bytes) -> Option<Self> {
-        let global_bytes = bytes
-            .len()
-            .div_ceil(GLOBAL_MEMORY_CHUNK)
-            .checked_mul(GLOBAL_MEMORY_CHUNK)?;
         let global_permit = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             budget
                 .global_memory
                 .clone()
-                .acquire_many_owned(global_bytes.try_into().ok()?),
+                .acquire_many_owned(bytes.len().try_into().ok()?),
         )
         .await
         .ok()?
