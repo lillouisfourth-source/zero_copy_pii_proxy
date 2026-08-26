@@ -1,6 +1,5 @@
 #![deny(warnings)]
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -169,7 +168,7 @@ async fn main() {
         .unwrap();
 }
 
-fn hash_keyring(source: &str) -> HashSet<[u8; 32]> {
+fn hash_keyring(source: &str) -> Vec<[u8; 32]> {
     source
         .lines()
         .map(str::trim)
@@ -178,7 +177,7 @@ fn hash_keyring(source: &str) -> HashSet<[u8; 32]> {
         .collect()
 }
 
-fn watch_auth_file(path: &Path, keyring: Arc<ArcSwap<HashSet<[u8; 32]>>>) {
+fn watch_auth_file(path: &Path, keyring: Arc<ArcSwap<Vec<[u8; 32]>>>) {
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = recommended_watcher(move |event: Result<Event, notify::Error>| {
@@ -200,6 +199,10 @@ fn watch_auth_file(path: &Path, keyring: Arc<ArcSwap<HashSet<[u8; 32]>>>) {
                 Ok(mut contents) => {
                     let next_keyring = Arc::new(hash_keyring(&contents));
                     contents.zeroize();
+                    if next_keyring.is_empty() {
+                        tracing::error!("Refusing to load empty auth file");
+                        return;
+                    }
                     keyring.store(next_keyring);
                     break;
                 }

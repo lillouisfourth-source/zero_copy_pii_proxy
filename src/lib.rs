@@ -12,7 +12,6 @@ use base64::engine::general_purpose::STANDARD as B64Std;
 use base64::Engine;
 use bytes::Bytes;
 use ed25519_dalek::{Signer, SigningKey};
-use std::collections::HashSet;
 use std::error::Error;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -33,6 +32,7 @@ use futures::StreamExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use reqwest::Client;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use tower_http::request_id::{
     MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
@@ -78,7 +78,7 @@ impl Error for RequestBodyError {
 pub struct AppState {
     pub client: Client,
     pub vault: Arc<arc_swap::ArcSwap<PiiVault>>,
-    pub auth_keyring: Arc<arc_swap::ArcSwap<HashSet<[u8; 32]>>>,
+    pub auth_keyring: Arc<arc_swap::ArcSwap<Vec<[u8; 32]>>>,
     pub upstream_url: String,
     pub allowed_origins: Vec<String>,
     pub prometheus_handle: Arc<PrometheusHandle>,
@@ -284,7 +284,11 @@ async fn require_auth(
         if let Ok(s) = hv.to_str() {
             if let Some(token) = s.strip_prefix("Bearer ") {
                 let token_hash = *blake3::hash(token.as_bytes()).as_bytes();
-                if state.auth_keyring.load().contains(&token_hash) {
+                let mut authenticated = subtle::Choice::from(0u8);
+                for valid_hash in state.auth_keyring.load().iter() {
+                    authenticated |= token_hash.ct_eq(valid_hash);
+                }
+                if authenticated.unwrap_u8() == 1 {
                     let resp = next.run(req).await;
                     return Ok(resp);
                 }
