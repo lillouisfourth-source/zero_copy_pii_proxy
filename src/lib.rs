@@ -513,8 +513,14 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let mut redactor = StreamRedactor::new(active_vault.as_ref());
         let mut hasher = blake3::Hasher::new();
         let mut done_detector = DoneDetector::default();
+        let mut downstream_closed = false;
         let reached_eof = loop {
             let item = match tokio::select! {
+                _ = tx_task.closed() => {
+                    tracing::warn!("Client disconnected mid-stream...");
+                    downstream_closed = true;
+                    break false;
+                }
                 _ = stream_shutdown.changed() => {
                     if *stream_shutdown.borrow() {
                         let events = done_detector.shutdown_events(&private_key, &mut hasher);
@@ -530,6 +536,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                 Ok(item) => item,
                 Err(_) => {
                     tracing::warn!("upstream stream idle timeout");
+                    send_terminal_error(&tx_task, &byte_budget, "upstream_idle_timeout").await;
                     return;
                 }
             };
@@ -562,6 +569,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                                     .is_err()
                                 {
                                     tracing::warn!("downstream enqueue failed or timed out; aborting upstream stream");
+                                    send_terminal_error(&tx_task, &byte_budget, "downstream_enqueue_failed").await;
                                     return;
                                 }
                             }
@@ -569,15 +577,20 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                     }
                     Err(error) => {
                         tracing::warn!("upstream stream rejected: {:?}", error);
+                        send_terminal_error(&tx_task, &byte_budget, "redaction_failed").await;
                         return;
                     }
                 },
                 Err(error) => {
                     tracing::warn!(error = %error, "error reading upstream chunk");
+                    send_terminal_error(&tx_task, &byte_budget, "upstream_read_failed").await;
                     return;
                 }
             }
         };
+        if downstream_closed {
+            return;
+        }
         match redactor.finish() {
             Ok(outputs) => {
                 for output in outputs {
@@ -607,7 +620,11 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                     }
                 }
             }
-            Err(error) => tracing::warn!("upstream stream rejected at end: {:?}", error),
+            Err(error) => {
+                tracing::warn!("upstream stream rejected at end: {:?}", error);
+                send_terminal_error(&tx_task, &byte_budget, "redaction_finish_failed").await;
+                return;
+            }
         }
         if is_sse
             && forward_stream_events(
@@ -669,6 +686,17 @@ async fn enqueue_with_timeout(
             Err(EnqueueError::Capacity)
         }
     }
+}
+
+async fn send_terminal_error(
+    sender: &crate::budget_queue::SegmentSender,
+    budget: &ByteBudget,
+    reason: &str,
+) {
+    let frame = Bytes::from(format!(
+        "data: {{\"error\": \"proxy_terminated\", \"reason\": \"{reason}\"}}\n\n"
+    ));
+    let _ = enqueue_with_timeout(sender, budget, frame).await;
 }
 
 async fn forward_stream_events(
