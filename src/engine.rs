@@ -1,6 +1,7 @@
 use aho_corasick::AhoCorasick;
 use bytes::{Bytes, BytesMut};
 use serde_json;
+use std::sync::Arc;
 use std::str::Utf8Error;
 
 const DEFAULT_MAX_BUFFER_CAPACITY: usize = 64 * 1024;
@@ -11,89 +12,28 @@ pub enum OutputSegment {
     Replacement(Bytes),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SseSegment {
-    Framing(Bytes),
-    Payload(Bytes),
+#[derive(Clone)]
+pub struct EngineState {
+    pub ac: AhoCorasick,
+    pub max_pattern_len: usize,
+    pub patterns: Vec<String>,
+    pub replacements: Vec<Bytes>,
+    pub replacement_strings: Vec<String>,
 }
 
-pub struct SseScanner {
-    prefix: BytesMut,
-    in_payload: bool,
-}
-
-impl Default for SseScanner {
-    fn default() -> Self {
+impl EngineState {
+    pub fn new(patterns: &[String], replacements: &[String]) -> Self {
+        let pattern_refs = patterns.iter().map(String::as_str).collect::<Vec<_>>();
+        let replacement_strings = replacements.to_vec();
         Self {
-            prefix: BytesMut::new(),
-            in_payload: false,
-        }
-    }
-}
-
-impl SseScanner {
-    pub fn scan(&mut self, chunk: Bytes) -> Vec<SseSegment> {
-        if chunk.is_empty() {
-            return Vec::new();
-        }
-        if self.in_payload {
-            if let Some(end) = chunk.iter().position(|byte| *byte == b'\n') {
-                self.in_payload = false;
-                return vec![
-                    SseSegment::Payload(chunk.slice(..end)),
-                    SseSegment::Framing(chunk.slice(end..)),
-                ];
-            }
-            return vec![SseSegment::Payload(chunk)];
-        }
-
-        let marker = b"data: ";
-        let probe_len = chunk.len().min(marker.len() - 1);
-        let mut probe = [0u8; 12];
-        let prefix_len = self.prefix.len();
-        probe[..prefix_len].copy_from_slice(&self.prefix);
-        probe[prefix_len..prefix_len + probe_len].copy_from_slice(&chunk[..probe_len]);
-        if let Some(start) = probe[..prefix_len + probe_len]
-            .windows(marker.len())
-            .position(|window| window == marker)
-        {
-            self.prefix.clear();
-            self.in_payload = true;
-            let offset = start + marker.len();
-            let mut events = Vec::new();
-            if start > 0 {
-                events.push(SseSegment::Framing(Bytes::copy_from_slice(&probe[..start])));
-            }
-            events.push(SseSegment::Framing(Bytes::copy_from_slice(marker)));
-            if offset < prefix_len + probe_len {
-                let payload_probe_end = (prefix_len + probe_len).min(chunk.len());
-                let chunk_offset = offset.saturating_sub(prefix_len);
-                events.push(SseSegment::Payload(
-                    chunk.slice(chunk_offset..payload_probe_end),
-                ));
-            }
-            if probe_len < chunk.len() {
-                events.push(SseSegment::Payload(chunk.slice(probe_len..)));
-            }
-            return events;
-        }
-
-        let retain_len = marker.len() - 1;
-        if chunk.len() <= retain_len {
-            self.prefix.extend_from_slice(&chunk);
-            return Vec::new();
-        }
-        let emit_len = chunk.len() - retain_len;
-        self.prefix.clear();
-        self.prefix.extend_from_slice(&chunk[emit_len..]);
-        vec![SseSegment::Framing(chunk.slice(..emit_len))]
-    }
-
-    pub fn finish(&mut self) -> Vec<SseSegment> {
-        if self.prefix.is_empty() {
-            Vec::new()
-        } else {
-            vec![SseSegment::Framing(self.prefix.split().freeze())]
+            ac: AhoCorasick::new(&pattern_refs).expect("failed to build aho-corasick automaton"),
+            max_pattern_len: patterns.iter().map(String::len).max().unwrap_or(0),
+            patterns: patterns.to_vec(),
+            replacements: replacement_strings
+                .iter()
+                .map(|value| Bytes::copy_from_slice(value.as_bytes()))
+                .collect(),
+            replacement_strings,
         }
     }
 }
@@ -113,26 +53,35 @@ pub struct PiiVault {
     pub replacements: Vec<Bytes>,
     pub replacement_strings: Vec<String>,
     pub escaped_replacements: Vec<String>,
+    pub engine_state: Arc<EngineState>,
 }
 
-pub struct StreamRedactor<'a> {
-    vault: &'a PiiVault,
+pub struct StreamRedactor {
+    state: Arc<EngineState>,
     pending: BytesMut,
     max_capacity: usize,
 }
 
-impl<'a> StreamRedactor<'a> {
-    pub fn new(vault: &'a PiiVault) -> Self {
-        Self::with_max_capacity(vault, DEFAULT_MAX_BUFFER_CAPACITY)
+impl StreamRedactor {
+    pub fn new(vault: &PiiVault) -> Self {
+        Self::from_state(vault.engine_state.clone())
     }
 
-    pub fn with_max_capacity(vault: &'a PiiVault, max_capacity: usize) -> Self {
+    pub fn from_state(state: Arc<EngineState>) -> Self {
+        Self::with_state_max_capacity(state, DEFAULT_MAX_BUFFER_CAPACITY)
+    }
+
+    pub fn with_max_capacity(vault: &PiiVault, max_capacity: usize) -> Self {
+        Self::with_state_max_capacity(vault.engine_state.clone(), max_capacity)
+    }
+
+    fn with_state_max_capacity(state: Arc<EngineState>, max_capacity: usize) -> Self {
         assert!(
             max_capacity > 0,
             "redaction buffer capacity must be non-zero"
         );
         Self {
-            vault,
+            state,
             pending: BytesMut::new(),
             max_capacity,
         }
@@ -180,7 +129,8 @@ impl<'a> StreamRedactor<'a> {
         let safe_len = if flush_all {
             text.len()
         } else {
-            determine_safe_boundary(text, self.vault).0.len()
+            let boundary = determine_safe_boundary_state(text, &self.state);
+            boundary.0.len()
         };
         let output = self.redact_source(&source, safe_len);
         let retained_end = if flush_all { source.len() } else { valid_len };
@@ -200,12 +150,12 @@ impl<'a> StreamRedactor<'a> {
     fn redact_source(&self, source: &Bytes, safe_len: usize) -> Vec<OutputSegment> {
         let mut output = Vec::new();
         let mut last = 0;
-        for mat in self.vault.searcher.find_iter(&source[..safe_len]) {
+        for mat in self.state.ac.find_iter(&source[..safe_len]) {
             if mat.start() > last {
                 output.push(OutputSegment::Input(source.slice(last..mat.start())));
             }
             output.push(OutputSegment::Replacement(
-                self.vault.replacements[mat.pattern()].clone(),
+                self.state.replacements[mat.pattern()].clone(),
             ));
             last = mat.end();
         }
@@ -247,6 +197,10 @@ impl PiiVault {
                 }
             })
             .collect::<Vec<_>>();
+        let engine_state = Arc::new(EngineState::new(
+            &patterns.iter().map(|pattern| (*pattern).to_string()).collect::<Vec<_>>(),
+            &replacement_strings,
+        ));
         Self {
             searcher,
             max_pattern_len: patterns
@@ -261,6 +215,7 @@ impl PiiVault {
             replacements: replacements_bytes,
             replacement_strings,
             escaped_replacements: escaped_replacements_vec,
+            engine_state,
         }
     }
 }
@@ -285,24 +240,39 @@ pub fn redact_text<'a>(text: &'a str, vault: &PiiVault) -> std::borrow::Cow<'a, 
 }
 
 pub fn determine_safe_boundary<'a>(text: &'a str, vault: &PiiVault) -> (&'a str, &'a str) {
-    if vault.max_pattern_len <= 1 {
-        return (text, "");
+    determine_safe_boundary_state(text, &vault.engine_state)
+}
+
+fn determine_safe_boundary_state<'a>(text: &'a str, state: &EngineState) -> (&'a str, &'a str) {
+    if text.is_empty() {
+        return ("", "");
     }
-    if text.len() <= vault.max_pattern_len {
+    if text.len() <= state.max_pattern_len {
         return ("", text);
     }
-    let mut partial_len = 0;
-    for pattern in &vault.patterns {
-        for prefix_len in 1..pattern.len().min(text.len()) {
-            if text.as_bytes().ends_with(&pattern.as_bytes()[..prefix_len]) {
-                partial_len = partial_len.max(prefix_len);
+
+    for pattern in &state.patterns {
+        if text.ends_with(pattern) {
+            return (text, "");
+        }
+    }
+
+    let mut retain = 0usize;
+    for pattern in &state.patterns {
+        let bytes = pattern.as_bytes();
+        let max_prefix = bytes.len().min(text.len());
+        for prefix_len in 1..max_prefix {
+            if text.as_bytes().ends_with(&bytes[..prefix_len]) {
+                retain = retain.max(prefix_len);
             }
         }
     }
-    if partial_len == 0 {
+
+    if retain == 0 {
         return (text, "");
     }
-    let mut split_at = text.len() - partial_len;
+
+    let mut split_at = text.len().saturating_sub(retain);
     while split_at > 0 && !text.is_char_boundary(split_at) {
         split_at -= 1;
     }

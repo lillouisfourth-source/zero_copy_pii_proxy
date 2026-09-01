@@ -8,7 +8,7 @@ use crate::budget_queue::{
     channel, enqueue, BudgetError, BudgetedBody, ByteBudget, EnqueueError, GLOBAL_MEMORY_CHUNK,
 };
 pub use crate::budget_queue::TenantBudget;
-use crate::engine::{OutputSegment, PiiVault, StreamRedactor};
+use crate::engine::{EngineState, OutputSegment, PiiVault, StreamRedactor};
 use base64::engine::general_purpose::STANDARD as B64Std;
 use base64::Engine;
 use bytes::Bytes;
@@ -33,6 +33,7 @@ use bytes::BytesMut;
 use futures::StreamExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use reqwest::Client;
+use serde::Deserialize;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
@@ -80,6 +81,7 @@ impl Error for RequestBodyError {
 pub struct AppState {
     pub client: Client,
     pub vault: Arc<arc_swap::ArcSwap<PiiVault>>,
+    pub engine_state: Arc<arc_swap::ArcSwap<EngineState>>,
     pub auth_keyring: Arc<arc_swap::ArcSwap<Vec<[u8; 32]>>>,
     pub upstream_url: String,
     pub allowed_origins: Vec<String>,
@@ -195,6 +197,7 @@ pub fn make_router(state: AppState) -> Router {
             "/v1/chat/completions",
             post(proxy_handler).layer(middleware::from_fn_with_state(state.clone(), require_auth)),
         )
+        .route("/_admin/rules", post(update_rules))
         .with_state(state.clone())
         // Global body limit to mitigate OOM/memory attacks (2 MiB)
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
@@ -215,6 +218,33 @@ pub fn make_router(state: AppState) -> Router {
         )
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RulesUpdate {
+    pub patterns: Vec<String>,
+}
+
+async fn update_rules(
+    State(state): State<AppState>,
+    axum::Json(update): axum::Json<RulesUpdate>,
+) -> StatusCode {
+    if update.patterns.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    let patterns = update.patterns;
+    let compiled = tokio::task::spawn_blocking(move || {
+        EngineState::new(
+            &patterns,
+            &patterns.iter().map(|_| "[REDACTED]".to_string()).collect::<Vec<_>>(),
+        )
+    })
+    .await;
+    let Ok(compiled) = compiled else {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    };
+    state.engine_state.store(Arc::new(compiled));
+    StatusCode::OK
 }
 
 pub fn make_metrics_router(prometheus_handle: Arc<PrometheusHandle>) -> Router {
@@ -507,7 +537,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     );
     let private_key = state.proxy_private_key.clone();
     let mut stream_shutdown = state.shutdown.clone();
-    let active_vault = state.vault.load_full();
+    let active_engine_state = state.engine_state.load_full();
     tokio::spawn(async move {
         struct ActiveStreamGuard {
             active_sse: bool,
@@ -523,7 +553,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let _stream_permit = stream_permit;
         let _stream_memory_permit = stream_memory_permit;
         let mut stream = upstream_response.bytes_stream();
-        let mut redactor = StreamRedactor::new(active_vault.as_ref());
+        let mut redactor = StreamRedactor::from_state(active_engine_state);
         let mut hasher = blake3::Hasher::new();
         let mut done_detector = DoneDetector::default();
         let mut downstream_closed = false;

@@ -86,6 +86,7 @@ async fn main() {
         .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be readable"));
     let auth_keyring = Arc::new(ArcSwap::new(Arc::new(hash_keyring(&auth_source))));
     auth_source.zeroize();
+    let tenant_budgets = Arc::new(dashmap::DashMap::new());
 
     let client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(90))
@@ -102,12 +103,17 @@ async fn main() {
     }
     let watch_keyring = auth_keyring.clone();
     let watch_auth_path = auth_file.clone();
-    tokio::task::spawn_blocking(move || watch_auth_file(&watch_auth_path, watch_keyring));
+    let watch_tenant_budgets = tenant_budgets.clone();
+    tokio::task::spawn_blocking(move || {
+        watch_auth_file(&watch_auth_path, watch_keyring, watch_tenant_budgets)
+    });
 
     let metrics_app = make_metrics_router(prometheus_handle.clone());
+    let initial_engine_state = vault.load_full().engine_state.as_ref().clone();
     let app = make_router(AppState {
         client,
         vault,
+        engine_state: Arc::new(ArcSwap::from_pointee(initial_engine_state)),
         auth_keyring,
         upstream_url,
         allowed_origins,
@@ -115,6 +121,7 @@ async fn main() {
         proxy_private_key,
         shutdown: shutdown.clone(),
         global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
+        tenant_budgets,
     });
 
     // Bind to 0.0.0.0 so Docker/K8s can route to it
@@ -177,7 +184,11 @@ fn hash_keyring(source: &str) -> Vec<[u8; 32]> {
         .collect()
 }
 
-fn watch_auth_file(path: &Path, keyring: Arc<ArcSwap<Vec<[u8; 32]>>>) {
+fn watch_auth_file(
+    path: &Path,
+    keyring: Arc<ArcSwap<Vec<[u8; 32]>>>,
+    tenant_budgets: Arc<dashmap::DashMap<[u8; 32], Arc<tokio::sync::Semaphore>>>,
+) {
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = recommended_watcher(move |event: Result<Event, notify::Error>| {
@@ -203,6 +214,7 @@ fn watch_auth_file(path: &Path, keyring: Arc<ArcSwap<Vec<[u8; 32]>>>) {
                         tracing::error!("Refusing to load empty auth file");
                         return;
                     }
+                    tenant_budgets.clear();
                     keyring.store(next_keyring);
                     break;
                 }
@@ -247,9 +259,9 @@ fn parse_private_key(value: String) -> Option<SigningKey> {
     } else {
         match base64::engine::general_purpose::STANDARD.decode(trimmed) {
             Ok(bytes) => bytes,
-            Err(error) => panic!(
-                "PROXY_PRIVATE_KEY must be a valid 32-byte hex or base64 seed: {error}"
-            ),
+            Err(error) => {
+                panic!("PROXY_PRIVATE_KEY must be a valid 32-byte hex or base64 seed: {error}")
+            }
         }
     };
 

@@ -29,9 +29,11 @@ async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::Join
         &["password"],
         &["[REDACTED]"],
     )));
+    let initial_engine_state = vault.load_full().engine_state.as_ref().clone();
     let router = make_router(AppState {
         client: Client::builder().build().expect("client"),
         vault,
+        engine_state: Arc::new(arc_swap::ArcSwap::from_pointee(initial_engine_state)),
         auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(vec![*blake3::hash(
             b"test_key",
         )

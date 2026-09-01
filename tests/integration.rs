@@ -22,6 +22,7 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
         &patterns,
         &replacements,
     )));
+    let initial_engine_state = vault.load_full().engine_state.as_ref().clone();
 
     // Start a tiny upstream server that streams a single SSE chunk and then sleeps briefly
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -49,6 +50,7 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
             .build()
             .unwrap(),
         vault,
+        engine_state: Arc::new(arc_swap::ArcSwap::from_pointee(initial_engine_state)),
         auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(vec![*blake3::hash(
             api_key.as_bytes(),
         )
