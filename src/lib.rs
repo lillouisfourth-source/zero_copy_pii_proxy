@@ -5,12 +5,14 @@ pub mod domain;
 pub mod engine;
 
 use crate::budget_queue::{
-    channel, enqueue, BudgetedBody, ByteBudget, EnqueueError, GLOBAL_MEMORY_CHUNK,
+    channel, enqueue, BudgetError, BudgetedBody, ByteBudget, EnqueueError, GLOBAL_MEMORY_CHUNK,
 };
+pub use crate::budget_queue::TenantBudget;
 use crate::engine::{OutputSegment, PiiVault, StreamRedactor};
 use base64::engine::general_purpose::STANDARD as B64Std;
 use base64::Engine;
 use bytes::Bytes;
+use dashmap::DashMap;
 use ed25519_dalek::{Signer, SigningKey};
 use std::error::Error;
 use std::sync::{
@@ -85,6 +87,7 @@ pub struct AppState {
     pub proxy_private_key: SigningKey,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
     pub global_memory: Arc<Semaphore>,
+    pub tenant_budgets: Arc<DashMap<[u8; 32], Arc<Semaphore>>>,
 }
 
 pub const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
@@ -289,7 +292,9 @@ async fn require_auth(
                     authenticated |= token_hash.ct_eq(valid_hash);
                 }
                 if authenticated.unwrap_u8() == 1 {
-                    let resp = next.run(req).await;
+                    let mut request = req;
+                    request.extensions_mut().insert(token_hash);
+                    let resp = next.run(request).await;
                     return Ok(resp);
                 }
             }
@@ -360,7 +365,6 @@ async fn cors_middleware(
 }
 
 pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Response<Body> {
-    // Count requests independently from streams; a stream exists only after upstream success.
     metrics::increment_counter!("proxy_requests_total");
     let request_span = Span::current();
     let request_id = req
@@ -369,6 +373,11 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         .map(|id| id.header_value().clone())
         .or_else(|| req.headers().get("x-request-id").cloned());
 
+    let tenant_id = req
+        .extensions()
+        .get::<[u8; 32]>()
+        .copied()
+        .unwrap_or([0u8; 32]);
     let request_content_type = req.headers().get("content-type").cloned();
     let body_stream: BodyDataStream = req.into_body().into_data_stream();
     let request_body = reqwest::Body::wrap_stream(body_stream);
@@ -490,8 +499,12 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     }
     let (tx, rx) = channel(32);
     let tx_task = tx.clone();
-    let byte_budget =
-        ByteBudget::from_global_shared(state.global_memory.clone(), OUTPUT_BYTE_BUDGET);
+    let byte_budget = ByteBudget::with_tenant(
+        tenant_id,
+        state.tenant_budgets.clone(),
+        state.global_memory.clone(),
+        OUTPUT_BYTE_BUDGET,
+    );
     let private_key = state.proxy_private_key.clone();
     let mut stream_shutdown = state.shutdown.clone();
     let active_vault = state.vault.load_full();
@@ -564,13 +577,24 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                                 }
                             } else {
                                 hasher.update(&bytes);
-                                if enqueue_with_timeout(&tx_task, &byte_budget, bytes)
-                                    .await
-                                    .is_err()
-                                {
-                                    tracing::warn!("downstream enqueue failed or timed out; aborting upstream stream");
-                                    send_terminal_error(&tx_task, &byte_budget, "downstream_enqueue_failed").await;
-                                    return;
+                                if let Err(error) = enqueue_with_timeout(&tx_task, &byte_budget, bytes).await {
+                                    match error {
+                                        EnqueueError::Budget(BudgetError::TenantLimitExceeded) => {
+                                            tracing::warn!("tenant byte budget exceeded for downstream stream");
+                                            send_terminal_error(&tx_task, &byte_budget, "tenant_limit_exceeded").await;
+                                            return;
+                                        }
+                                        EnqueueError::Budget(BudgetError::GlobalLimitExceeded) => {
+                                            tracing::warn!("global memory budget exhausted for downstream stream");
+                                            send_terminal_error(&tx_task, &byte_budget, "global_limit_exceeded").await;
+                                            return;
+                                        }
+                                        _ => {
+                                            tracing::warn!("downstream enqueue failed or timed out; aborting upstream stream");
+                                            send_terminal_error(&tx_task, &byte_budget, "downstream_enqueue_failed").await;
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -610,12 +634,21 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                         }
                     } else {
                         hasher.update(&bytes);
-                        if enqueue_with_timeout(&tx_task, &byte_budget, bytes)
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("downstream enqueue failed or timed out; aborting upstream stream");
-                            return;
+                        if let Err(error) = enqueue_with_timeout(&tx_task, &byte_budget, bytes).await {
+                            match error {
+                                EnqueueError::Budget(BudgetError::TenantLimitExceeded) => {
+                                    tracing::warn!("tenant byte budget exceeded while finalizing stream");
+                                    return;
+                                }
+                                EnqueueError::Budget(BudgetError::GlobalLimitExceeded) => {
+                                    tracing::warn!("global memory budget exhausted while finalizing stream");
+                                    return;
+                                }
+                                _ => {
+                                    tracing::warn!("downstream enqueue failed or timed out; aborting upstream stream");
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
