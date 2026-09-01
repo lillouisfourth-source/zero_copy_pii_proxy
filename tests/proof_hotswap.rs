@@ -57,6 +57,7 @@ async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
         upstream_url: format!("http://{}", upstream_addr),
         allowed_origins: Vec::new(),
         prometheus_handle,
+        metrics_handle: PrometheusBuilder::new().build().handle(),
         proxy_private_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         shutdown: tokio::sync::watch::channel(false).1,
         global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
@@ -79,6 +80,7 @@ async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
 
     let control = client
         .post(format!("http://{}/_admin/rules", proxy_addr))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&serde_json::json!({"patterns": ["beta"]}))
         .send()
         .await

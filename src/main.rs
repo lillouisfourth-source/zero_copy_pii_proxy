@@ -24,11 +24,10 @@ async fn main() {
 
     tracing_subscriber::fmt::init();
 
-    // Build a recorder and install it as the global metrics recorder. Obtain a handle for /metrics
     let recorder = PrometheusBuilder::new().build();
-    let handle = recorder.handle();
-    metrics::set_boxed_recorder(Box::new(recorder)).expect("failed to set metrics recorder");
-    let prometheus_handle = Arc::new(handle);
+    let recorder_handle = recorder.handle();
+    metrics::set_boxed_recorder(Box::new(recorder)).expect("failed to install metrics recorder");
+    let prometheus_handle = Arc::new(recorder_handle.clone());
 
     // Load 12-factor configuration from environment
     let proxy_port = std::env::var("PROXY_PORT")
@@ -118,6 +117,7 @@ async fn main() {
         upstream_url,
         allowed_origins,
         prometheus_handle,
+        metrics_handle: recorder_handle,
         proxy_private_key,
         shutdown: shutdown.clone(),
         global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),

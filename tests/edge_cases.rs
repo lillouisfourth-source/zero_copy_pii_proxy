@@ -30,6 +30,7 @@ async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::Join
         &["[REDACTED]"],
     )));
     let initial_engine_state = vault.load_full().engine_state.as_ref().clone();
+    let app_metrics_handle = (*metrics_handle()).clone();
     let router = make_router(AppState {
         client: Client::builder().build().expect("client"),
         vault,
@@ -41,6 +42,7 @@ async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::Join
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle: metrics_handle(),
+        metrics_handle: app_metrics_handle,
         proxy_private_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         shutdown: tokio::sync::watch::channel(false).1,
         global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),

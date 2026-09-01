@@ -58,6 +58,7 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle: prometheus_handle.clone(),
+        metrics_handle: (*prometheus_handle).clone(),
         proxy_private_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         shutdown: tokio::sync::watch::channel(false).1,
         global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),

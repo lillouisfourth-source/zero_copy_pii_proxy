@@ -86,6 +86,7 @@ pub struct AppState {
     pub upstream_url: String,
     pub allowed_origins: Vec<String>,
     pub prometheus_handle: Arc<PrometheusHandle>,
+    pub metrics_handle: PrometheusHandle,
     pub proxy_private_key: SigningKey,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
     pub global_memory: Arc<Semaphore>,
@@ -191,13 +192,20 @@ fn decrement_active_sse_streams() {
 /// Build the axum Router used by main and tests. Exposed publicly for integration tests.
 pub fn make_router(state: AppState) -> Router {
     let request_id_header = axum::http::HeaderName::from_static("x-request-id");
+    let admin_routes = Router::new()
+        .route("/rules", post(update_rules))
+        .route("/metrics", get(admin_metrics))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
 
     Router::new()
         .route(
             "/v1/chat/completions",
             post(proxy_handler).layer(middleware::from_fn_with_state(state.clone(), require_auth)),
         )
-        .route("/_admin/rules", post(update_rules))
+        .nest("/_admin", admin_routes)
         .with_state(state.clone())
         // Global body limit to mitigate OOM/memory attacks (2 MiB)
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
@@ -244,7 +252,12 @@ async fn update_rules(
         return StatusCode::INTERNAL_SERVER_ERROR;
     };
     state.engine_state.store(Arc::new(compiled));
+    metrics::increment_counter!("rules_swaps_total");
     StatusCode::OK
+}
+
+async fn admin_metrics(State(state): State<AppState>) -> String {
+    state.metrics_handle.render()
 }
 
 pub fn make_metrics_router(prometheus_handle: Arc<PrometheusHandle>) -> Router {
@@ -331,6 +344,30 @@ async fn require_auth(
         }
     }
     metrics::increment_counter!("proxy_auth_failures_total");
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let Some(header) = req.headers().get(axum::http::header::AUTHORIZATION) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let Ok(value) = header.to_str() else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let token_hash = blake3::hash(token.as_bytes());
+    let keyring = state.auth_keyring.load();
+    for valid_hash in keyring.iter() {
+        if token_hash.as_bytes().ct_eq(valid_hash).unwrap_u8() == 1 {
+            return Ok(next.run(req).await);
+        }
+    }
     Err(StatusCode::UNAUTHORIZED)
 }
 
