@@ -238,16 +238,25 @@ fn parse_pii_config(source: &str) -> (Vec<String>, Vec<String>) {
 
 fn parse_private_key(value: String) -> Option<SigningKey> {
     let trimmed = value.trim();
-    let raw = if trimmed.len() == 64 && trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        hex_decode(trimmed)
+
+    let raw = if trimmed.len() == 64 {
+        match hex::decode(trimmed) {
+            Ok(bytes) => bytes,
+            Err(error) => panic!("PROXY_PRIVATE_KEY contains invalid hexadecimal data: {error}"),
+        }
     } else {
-        base64::engine::general_purpose::STANDARD
-            .decode(trimmed)
-            .ok()?
+        match base64::engine::general_purpose::STANDARD.decode(trimmed) {
+            Ok(bytes) => bytes,
+            Err(error) => panic!(
+                "PROXY_PRIVATE_KEY must be a valid 32-byte hex or base64 seed: {error}"
+            ),
+        }
     };
+
     if raw.len() != 32 {
-        return None;
+        panic!("PROXY_PRIVATE_KEY must decode to exactly 32 bytes");
     }
+
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&raw);
     Some(SigningKey::from_bytes(&bytes))
@@ -302,17 +311,6 @@ fn watch_pii_config(config_path: &Path, vault: Arc<ArcSwap<PiiVault>>) {
         vault.store(next_vault);
         tracing::info!(path = %config_path.display(), "swapped PII vault after config update");
     }
-}
-
-fn hex_decode(value: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    let chars: Vec<u8> = value.as_bytes().to_vec();
-    for chunk in chars.chunks(2) {
-        let hex = std::str::from_utf8(chunk).unwrap();
-        let byte = u8::from_str_radix(hex, 16).unwrap_or(0);
-        bytes.push(byte);
-    }
-    bytes
 }
 
 /// Waits for ctrl+c and then returns, used for graceful shutdown registration.
