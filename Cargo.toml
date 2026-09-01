@@ -41,4 +41,10 @@ hex = "0.4.3"
 dashmap = "6.2.1"
 
 [dev-dependencies]
+criterion = "0.8.2"
 proptest = "1.6"
+
+[[bench]]
+name = "simd_throughput"
+path = "benches/simd_throughput.rs"
+harness = false
