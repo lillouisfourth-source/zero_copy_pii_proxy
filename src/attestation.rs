@@ -94,7 +94,7 @@ impl KmsProvider for NitroKmsProvider {
                 nsm_fd.as_raw_fd(),
                 aws_nitro_enclaves_nsm_api::api::Request::Attestation {
                     nonce: None,
-                    public_key: Some(public_key_der),
+                    public_key: Some(public_key_der.into()),
                     user_data: None,
                 },
             )

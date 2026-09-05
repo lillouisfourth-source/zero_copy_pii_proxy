@@ -22,7 +22,7 @@ async fn slowloris_split_chunk_pii_attack() {
     // Initialize metrics
     let prometheus_builder = metrics_exporter_prometheus::PrometheusBuilder::new();
     let prometheus_recorder = prometheus_builder.build();
-    let prometheus_handle = prometheus_recorder.handle();
+    let _prometheus_handle = prometheus_recorder.handle();
     let _ = metrics::set_boxed_recorder(Box::new(prometheus_recorder));
 
     // Create policy with SSN pattern
