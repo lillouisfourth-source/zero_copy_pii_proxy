@@ -59,6 +59,7 @@ networkPolicy:
   upstreamApiPort: 443
   mockEgressEnabled: false
   mockEgressPort: 443
+  mockEgressTargetPort: 8081
 
 secrets:
   authTokens: "replace-me"
