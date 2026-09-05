@@ -152,7 +152,7 @@ jobs:
             selector:
               app: pii-mock
             ports:
-              - port: 443
+              - port: 8081
                 targetPort: 8081
           YAML
           kubectl rollout status deployment/pii-mock --timeout=90s
@@ -161,10 +161,10 @@ jobs:
           helm upgrade --install zero-copy-pii-proxy ./charts/zero-copy-pii-proxy \
             --set image.repository=zero-copy-pii-proxy \
             --set image.tag=test \
-            --set config.upstreamApiUrl=http://pii-mock:443 \
+            --set config.upstreamApiUrl=http://pii-mock:8081 \
             --set networkPolicy.upstreamApiPort=443 \
             --set networkPolicy.mockEgressEnabled=true \
-            --set networkPolicy.mockEgressPort=443 \
+            --set networkPolicy.mockEgressPort=8081 \
             --set networkPolicy.mockEgressTargetPort=8081 \
             --set-string secrets.authTokens=test_key \
             --set-string secrets.mockProxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
