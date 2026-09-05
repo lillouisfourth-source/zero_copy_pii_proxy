@@ -53,5 +53,5 @@ spec:
             cidr: {{ $upstreamApiCidr | quote }}
       ports:
         - protocol: TCP
-          port: 443
+          port: {{ .Values.networkPolicy.upstreamApiPort | default 443 }}
 {{- end }}

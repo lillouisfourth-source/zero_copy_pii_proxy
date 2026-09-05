@@ -162,6 +162,7 @@ jobs:
             --set image.repository=zero-copy-pii-proxy \
             --set image.tag=test \
             --set config.upstreamApiUrl=http://pii-mock:443 \
+            --set networkPolicy.upstreamApiPort=8081 \
             --set-string secrets.authTokens=test_key \
             --set-string secrets.mockProxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
             --set-string secrets.mockKmsCiphertext=dGVzdF9rZXk= \
@@ -185,10 +186,11 @@ jobs:
           exit 1
       - name: Verify Single Request Path
         run: |
-          kubectl exec deployment/zero-copy-pii-proxy -- curl -sS -i -X POST \
+          curl --fail-with-body -sS -i -X POST \
             -H "Authorization: Bearer test_key" \
-            -d '{"message": "ping"}' \
-            http://127.0.0.1:3000/v1/chat/completions || true
+            -H "Content-Type: application/json" \
+            -d '{"message":"ping"}' \
+            http://127.0.0.1:3000/v1/chat/completions
       - name: Run k6 load test
         run: |
           docker run --network host \
