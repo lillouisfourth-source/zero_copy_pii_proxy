@@ -19,6 +19,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Verify Nitro Docker build flags
+        run: |
+          set -euo pipefail
+          grep -F -- '--locked' Dockerfile.enclave
+          grep -F -- '--features nitro' Dockerfile.enclave
+
       - name: Build enclave image run 1
         run: |
           docker build --no-cache -f Dockerfile.enclave -t pii-proxy-enclave:run1 .
@@ -70,10 +76,18 @@ jobs:
             exit 1
           fi
           printf '%s' "$PCR0_RUN1" > verified_pcr0.txt
+          jq -n \
+            --arg pcr0_run1 "$PCR0_RUN1" \
+            --arg pcr0_run2 "$PCR0_RUN2" \
+            --arg verified_pcr0 "$PCR0_RUN1" \
+            '{pcr0_run1: $pcr0_run1, pcr0_run2: $pcr0_run2, verified_pcr0: $verified_pcr0}' \
+            > pcr_measurements.json
           echo "verified_pcr0=$PCR0_RUN1" >> "$GITHUB_OUTPUT"
 
-      - name: Publish verified PCR0 artifact
+      - name: Publish verified PCR0 measurements
         uses: actions/upload-artifact@v4
         with:
-          name: verified-pcr0
-          path: verified_pcr0.txt
+          name: pcr-measurements
+          path: |
+            verified_pcr0.txt
+            pcr_measurements.json

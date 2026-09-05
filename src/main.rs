@@ -199,7 +199,7 @@ async fn build_upstream_client() -> Client {
                 .expect("LocalStack API key produced an invalid Authorization header");
         authorization.set_sensitive(true);
         headers.insert(AUTHORIZATION, authorization);
-        return Client::builder()
+        Client::builder()
             .default_headers(headers)
             .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Duration::from_secs(30))
@@ -222,7 +222,7 @@ async fn build_upstream_client() -> Client {
                 .expect("Nitro API key produced an invalid Authorization header");
         authorization.set_sensitive(true);
         headers.insert(AUTHORIZATION, authorization);
-        return Client::builder()
+        Client::builder()
             .default_headers(headers)
             .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Duration::from_secs(30))
