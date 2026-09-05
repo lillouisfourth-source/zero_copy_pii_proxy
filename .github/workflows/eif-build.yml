@@ -1,0 +1,79 @@
+name: Deterministic EIF Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  enclave-determinism:
+    runs-on: ubuntu-latest
+    outputs:
+      verified_pcr0: ${{ steps.verify.outputs.verified_pcr0 }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build enclave image run 1
+        run: |
+          docker build --no-cache -f Dockerfile.enclave -t pii-proxy-enclave:run1 .
+
+      - name: Build EIF run 1
+        id: pcr1
+        run: |
+          docker run --rm --privileged --network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            amazonlinux:2023 \
+            bash -lc '
+              set -euxo pipefail
+              dnf install -y aws-nitro-enclaves-cli jq && \
+              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run1 --output-file enclave_run1.eif > build_run1.json && \
+              jq -r .Measurements.PCR0 build_run1.json > pcr0_run1.txt
+            '
+
+      - name: Build enclave image run 2
+        run: |
+          docker build --no-cache -f Dockerfile.enclave -t pii-proxy-enclave:run2 .
+
+      - name: Build EIF run 2
+        id: pcr2
+        run: |
+          docker run --rm --privileged --network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            amazonlinux:2023 \
+            bash -lc '
+              set -euxo pipefail
+              dnf install -y aws-nitro-enclaves-cli jq && \
+              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run2 --output-file enclave_run2.eif > build_run2.json && \
+              jq -r .Measurements.PCR0 build_run2.json > pcr0_run2.txt
+            '
+
+      - name: Verify PCR0 determinism
+        id: verify
+        run: |
+          set -euo pipefail
+          PCR0_RUN1="$(cat pcr0_run1.txt)"
+          PCR0_RUN2="$(cat pcr0_run2.txt)"
+          echo "PCR0_RUN1=${PCR0_RUN1}"
+          echo "PCR0_RUN2=${PCR0_RUN2}"
+          if [ "$PCR0_RUN1" != "$PCR0_RUN2" ]; then
+            echo "PCR0 mismatch between build runs; determinism gate failed."
+            exit 1
+          fi
+          printf '%s' "$PCR0_RUN1" > verified_pcr0.txt
+          echo "verified_pcr0=$PCR0_RUN1" >> "$GITHUB_OUTPUT"
+
+      - name: Publish verified PCR0 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-pcr0
+          path: verified_pcr0.txt

@@ -54,11 +54,6 @@ spec:
             {{- end }}
             - name: PROXY_AUTH_FILE
               value: /etc/zero-copy-pii-proxy-auth/AUTH_TOKENS
-            - name: PROXY_PRIVATE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
-                  key: PROXY_PRIVATE_KEY
           volumeMounts:
             {{- if .Values.config.piiConfigMap }}
             - name: pii-config

@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2021"
 
 [dependencies]
+async-trait = "0.1"
 axum = { version = "0.8", features = ["tokio", "macros"] }
 tokio = { version = "1.37", features = ["full"] }
 reqwest = { version = "0.13", features = ["stream", "json"] }
@@ -16,7 +17,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 aho-corasick = "1.1"
 blake3 = "1.8"
-base64 = "0.22"
+base64 = { version = "0.22", optional = true }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 arc-swap = "1.1"
 notify = "6.1"
@@ -39,10 +40,43 @@ uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
 hex = "0.4.3"
 dashmap = "6.2.1"
+# AWS Nitro Enclave attestation and KMS integration
+aws-nitro-enclaves-nsm-api = { version = "0.3", optional = true }
+aws-sdk-kms = "1.0"
+aws-config = "1.0"
+aws-smithy-runtime = "1.0"
+aws-smithy-runtime-api = "1.0"
+aws-smithy-types = "1.0"
+rsa = { version = "0.9", features = ["sha2"], optional = true }
+tokio-vsock = { version = "0.4", optional = true }
+secrecy = "0.10.3"
+sha2 = { version = "0.10", optional = true }
+
+[features]
+default = ["dep:base64"]
+nitro = [
+	"dep:aws-nitro-enclaves-nsm-api",
+	"dep:tokio-vsock",
+	"dep:rsa",
+	"dep:sha2",
+	"dep:base64",
+]
+host-bridge = ["dep:tokio-vsock"]
 
 [dev-dependencies]
 criterion = "0.8.2"
 proptest = "1.6"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+[[bin]]
+name = "vsock_host_bridge"
+path = "src/bin/vsock_host_bridge.rs"
+required-features = ["host-bridge"]
+
+[[bin]]
+name = "host_relay"
+path = "src/bin/host_relay.rs"
+required-features = ["host-bridge"]
 
 [[bench]]
 name = "simd_throughput"

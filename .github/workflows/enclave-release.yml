@@ -1,0 +1,72 @@
+name: Nitro Enclave Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-eif:
+    runs-on: ubuntu-latest
+    outputs:
+      pcr0: ${{ steps.pcr0.outputs.pcr0 }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build Phase 1 Docker image
+        run: docker build -t pii-proxy:latest .
+
+      - name: Build EIF in Amazon Linux 2023
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            amazonlinux:2023 \
+            bash -c '
+              dnf install -y aws-nitro-enclaves-cli jq docker-cli
+              nitro-cli build-enclave --docker-uri pii-proxy:latest --output-file proxy.eif
+              nitro-cli describe-eif --eif-path proxy.eif > eif_info.json
+            '
+
+      - name: Extract PCR0
+        id: pcr0
+        run: |
+          PCR0="$(jq -er '.Measurements.PCR0 // .Measurements[0].PCR0 // .pcr0 // .PCR0' eif_info.json)"
+          echo "pcr0=$PCR0" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Nitro Enclave Measurement"
+            echo
+            echo "PCR0 (Image Hash): \\`$PCR0\\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload EIF measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: enclave-measurements
+          path: |
+            proxy.eif
+            eif_info.json
+
+  apply-production-kms-policy:
+    needs: build-eif
+    runs-on: ubuntu-latest
+    environment: production-kms-approval
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Inject approved PCR0 and apply Terraform
+        env:
+          PCR0: ${{ needs.build-eif.outputs.pcr0 }}
+        run: |
+          test -n "$PCR0"
+          sed "s/PLACEHOLDER_PCR0_SHA384_HASH/$PCR0/g" \
+            terraform/kms_policy.json > terraform/kms_policy.approved.json
+          terraform -chdir=terraform/eks_enclaves init -input=false
+          terraform -chdir=terraform/eks_enclaves apply -auto-approve \
+            -var="pcr0_hash=$PCR0"

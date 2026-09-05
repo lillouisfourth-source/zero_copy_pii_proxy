@@ -1,0 +1,198 @@
+---
+# Namespace isolation: proxy and monitoring namespaces are separate trust domains
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: proxy
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+
+---
+# NetworkPolicy: Ingress from ingress-nginx to port 3000 (data plane)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: proxy-data-plane-ingress
+  namespace: proxy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: zero-copy-pii-proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow ingress on port 3000 ONLY from ingress-nginx controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3000
+
+---
+# NetworkPolicy: Strict isolation of admin/metrics port (9090)
+# CRITICAL: Port 9090 is never exposed externally.
+# Prometheus scraper in monitoring namespace can access it via direct pod-to-pod communication.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: proxy-admin-plane-isolation
+  namespace: proxy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: zero-copy-pii-proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow ingress on port 9090 ONLY from Prometheus in monitoring namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+    # Explicitly deny all other traffic to port 9090
+    # (implicit, but made explicit for audit trail)
+
+---
+# NetworkPolicy: Egress from proxy namespace (fail-closed)
+# CRITICAL: Only TCP 443 (upstream LLM) and UDP 53 (DNS) are allowed.
+# Everything else is denied by default.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: proxy-egress-hardened
+  namespace: proxy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: zero-copy-pii-proxy
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS queries to Kubernetes DNS (kube-dns or CoreDNS)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+        - podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    # Allow TLS connections to upstream LLM API (port 443)
+    - to:
+        - podSelector: {}  # Allows egress to any pod in the cluster (should be tightened to specific upstream)
+      ports:
+        - protocol: TCP
+          port: 443
+    # Allow HTTPS to external IPs (Kubernetes DNS, NTP, etc.)
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+    # EXPLICIT DENY: No HTTP (80), no SSH (22), no databases (3306, 5432, etc.)
+    # This is a "default deny all" policy; only the above two rules are allowed.
+
+---
+# NetworkPolicy: Deny all ingress by default (except explicitly allowed above)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: proxy-default-deny-ingress
+  namespace: proxy
+spec:
+  podSelector: {}  # Applies to all pods in namespace
+  policyTypes:
+    - Ingress
+  ingress: []  # Empty list = deny all ingress
+
+---
+# NetworkPolicy: Deny all egress by default (except explicitly allowed above)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: proxy-default-deny-egress
+  namespace: proxy
+spec:
+  podSelector: {}  # Applies to all pods in namespace
+  policyTypes:
+    - Egress
+  egress: []  # Empty list = deny all egress
+
+---
+# Resource Quota: Prevent runaway resource consumption in proxy namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: proxy-quota
+  namespace: proxy
+spec:
+  hard:
+    # CPU: Total 2 CPUs across all pods
+    requests.cpu: "2"
+    limits.cpu: "4"
+    # Memory: Total 4Gi across all pods
+    requests.memory: "4Gi"
+    limits.memory: "8Gi"
+    # Pods: Maximum 10 pods
+    pods: "10"
+    # Persistent volumes: Maximum 2
+    persistentvolumeclaims: "2"
+
+---
+# LimitRange: Per-pod resource constraints
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: proxy-limits
+  namespace: proxy
+spec:
+  limits:
+    - type: Pod
+      max:
+        cpu: "1"
+        memory: "2Gi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "250m"
+        memory: "256Mi"
+    - type: Container
+      max:
+        cpu: "1"
+        memory: "2Gi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "250m"
+        memory: "256Mi"

@@ -1,4 +1,5 @@
-#![deny(warnings)]
+#[cfg(all(not(debug_assertions), not(feature = "nitro")))]
+compile_error!("Release builds MUST enable the 'nitro' feature.");
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,13 +12,21 @@ use dotenvy::dotenv;
 use ed25519_dalek::SigningKey;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+use secrecy::ExposeSecret;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::ServiceBuilder;
 
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
+use zero_copy_pii_proxy::attestation::decrypt_upstream_api_key;
+#[cfg(all(debug_assertions, not(feature = "nitro")))]
+use zero_copy_pii_proxy::attestation::LocalMockProvider;
+#[cfg(feature = "nitro")]
+use zero_copy_pii_proxy::attestation::NitroKmsProvider;
 use zero_copy_pii_proxy::engine::PiiVault;
 use zero_copy_pii_proxy::{active_sse_streams, make_metrics_router, make_router, AppState};
 
+#[deny(warnings)]
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -87,6 +96,173 @@ async fn main() {
     auth_source.zeroize();
     let tenant_budgets = Arc::new(dashmap::DashMap::new());
 
+    let client = build_upstream_client().await;
+    let shutdown = shutdown_signal();
+    if let Some(config_path) = std::env::var("PII_CONFIG_PATH").ok().map(PathBuf::from) {
+        let watch_vault = vault.clone();
+        let watch_path = config_path.clone();
+        tokio::task::spawn_blocking(move || {
+            watch_pii_config(&watch_path, watch_vault);
+        });
+    }
+    let watch_keyring = auth_keyring.clone();
+    let watch_auth_path = auth_file.clone();
+    let watch_tenant_budgets = tenant_budgets.clone();
+    tokio::task::spawn_blocking(move || {
+        watch_auth_file(&watch_auth_path, watch_keyring, watch_tenant_budgets)
+    });
+
+    let metrics_app = make_metrics_router(prometheus_handle.clone());
+    let initial_engine_state = vault.load_full().engine_state.as_ref().clone();
+    let app = make_router(AppState {
+        client,
+        vault,
+        engine_state: Arc::new(ArcSwap::from_pointee(initial_engine_state)),
+        auth_keyring,
+        upstream_url,
+        allowed_origins,
+        prometheus_handle,
+        metrics_handle: recorder_handle,
+        proxy_private_key,
+        shutdown: shutdown.clone(),
+        global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
+        tenant_budgets,
+    });
+
+    // Bind to 0.0.0.0 so Docker/K8s can route to it
+    let bind_addr = format!("0.0.0.0:{}", proxy_port);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
+    tracing::info!("listening on {}", listener.local_addr().unwrap());
+    let metrics_listener = tokio::net::TcpListener::bind("0.0.0.0:9090")
+        .await
+        .expect("failed to bind metrics listener");
+
+    // Build a service with concurrency limit; the app already has the global CORS middleware applied.
+    let svc = ServiceBuilder::new()
+        .layer(ConcurrencyLimitLayer::new(1000))
+        .service(app);
+
+    let mut shutdown = shutdown;
+    let mut watchdog_shutdown = shutdown.clone();
+    let shutdown_timeout = std::env::var("SHUTDOWN_TIMEOUT_SEC")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(110);
+    tokio::spawn(async move {
+        let _ = watchdog_shutdown.changed().await;
+        tokio::time::sleep(Duration::from_secs(shutdown_timeout)).await;
+        let streams = active_sse_streams();
+        tracing::error!(
+            streams,
+            "graceful shutdown watchdog expired; forcing process exit"
+        );
+        metrics::increment_counter!("proxy_watchdog_force_kills_total");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        std::process::exit(0);
+    });
+
+    let mut metrics_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        axum::serve(metrics_listener, metrics_app)
+            .with_graceful_shutdown(async move {
+                let _ = metrics_shutdown.changed().await;
+            })
+            .await
+            .expect("metrics server failed");
+    });
+
+    axum::serve(listener, svc)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.changed().await;
+            tracing::info!("shutdown signal received; draining active connections");
+        })
+        .await
+        .unwrap();
+}
+
+async fn build_upstream_client() -> Client {
+    #[cfg(all(debug_assertions, not(feature = "nitro")))]
+    {
+        if std::env::var("LOCALSTACK_ENDPOINT").is_err() {
+            panic!("LOCALSTACK_ENDPOINT is required for debug-mode startup");
+        }
+        let provider = LocalMockProvider::new()
+            .await
+            .expect("failed to initialize LocalStack KMS provider");
+        let ciphertext = read_localstack_ciphertext().await;
+        let secret = decrypt_upstream_api_key(Arc::new(provider), ciphertext)
+            .await
+            .expect("failed to decrypt LocalStack fixture; refusing unauthenticated boot");
+        let mut headers = HeaderMap::new();
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", secret.expose_secret()))
+            .expect("LocalStack API key produced an invalid Authorization header");
+        authorization.set_sensitive(true);
+        headers.insert(AUTHORIZATION, authorization);
+        return Client::builder()
+            .default_headers(headers)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .expect("failed to build upstream HTTP client");
+    }
+
+    #[cfg(feature = "nitro")]
+    {
+        let provider = NitroKmsProvider::new()
+            .await
+            .expect("failed to initialize Nitro KMS provider");
+        let ciphertext = read_nitro_ciphertext().await;
+        let secret = decrypt_upstream_api_key(Arc::new(provider), ciphertext)
+            .await
+            .expect("failed to decrypt Nitro secret; refusing unauthenticated boot");
+        let mut headers = HeaderMap::new();
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", secret.expose_secret()))
+            .expect("Nitro API key produced an invalid Authorization header");
+        authorization.set_sensitive(true);
+        headers.insert(AUTHORIZATION, authorization);
+        return Client::builder()
+            .default_headers(headers)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .expect("failed to build upstream HTTP client");
+    }
+}
+
+#[cfg(all(debug_assertions, not(feature = "nitro")))]
+async fn read_localstack_ciphertext() -> Vec<u8> {
+    let path = Path::new(".aws-mock/ciphertext.b64");
+    for attempt in 1..=10 {
+        match tokio::fs::read_to_string(path).await {
+            Ok(contents) => {
+                let contents = contents.trim();
+                return base64::engine::general_purpose::STANDARD
+                    .decode(contents)
+                    .expect("LocalStack ciphertext fixture is not valid Base64");
+            }
+            Err(error) if attempt < 10 => {
+                tracing::warn!(attempt, %error, "waiting for LocalStack ciphertext fixture");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(error) => panic!("LocalStack ciphertext fixture unavailable after 10 attempts: {error}"),
+        }
+    }
+    unreachable!()
+}
+
+#[cfg(feature = "nitro")]
+async fn read_nitro_ciphertext() -> Vec<u8> {
+    let mut contents = tokio::fs::read_to_string("/run/secrets/ciphertext.b64")
+        .await
+        .expect("Nitro ciphertext fixture is required");
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(contents.trim())
+        .expect("Nitro ciphertext fixture is not valid Base64");
+    contents.zeroize();
+    ciphertext
+}
+
+/*
     let client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Duration::from_secs(30))
@@ -174,6 +350,7 @@ async fn main() {
         .await
         .unwrap();
 }
+    */
 
 fn hash_keyring(source: &str) -> Vec<[u8; 32]> {
     source

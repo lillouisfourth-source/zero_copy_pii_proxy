@@ -1,4 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- $coreDnsCidr := default "10.96.0.10/32" .Values.networkPolicy.coreDnsCidr }}
+{{- $kmsVpcEndpointCidr := required "A valid networkPolicy.kmsVpcEndpointCidr is required for AWS KMS PrivateLink egress." .Values.networkPolicy.kmsVpcEndpointCidr }}
+{{- $upstreamApiCidr := required "A valid networkPolicy.upstreamApiCidr is required for upstream API egress." .Values.networkPolicy.upstreamApiCidr }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -25,18 +28,30 @@ spec:
         - protocol: TCP
           port: 9090
   egress:
-    - ports:
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 80
+    - to:
+        - ipBlock:
+            cidr: {{ $coreDnsCidr | quote }}
+      ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
+    - to:
+        - ipBlock:
+            cidr: {{ $kmsVpcEndpointCidr | quote }}
+      ports:
         - protocol: TCP
           port: 443
-      {{- with .Values.networkPolicy.egressCidrs }}
-      to:
-        {{- range . }}
+    - to:
         - ipBlock:
-            cidr: {{ . | quote }}
-        {{- end }}
-      {{- end }}
+            cidr: {{ $upstreamApiCidr | quote }}
+      ports:
+        - protocol: TCP
+          port: 443
 {{- end }}

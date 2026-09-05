@@ -1,8 +1,13 @@
 #![deny(warnings)]
 
+pub mod attestation;
 pub mod budget_queue;
 pub mod domain;
 pub mod engine;
+#[cfg(feature = "nitro")]
+pub mod vsock_bridge;
+#[cfg(feature = "host-bridge")]
+pub mod vsock_host_bridge;
 
 use crate::budget_queue::{
     channel, enqueue, BudgetError, BudgetedBody, ByteBudget, EnqueueError, GLOBAL_MEMORY_CHUNK,

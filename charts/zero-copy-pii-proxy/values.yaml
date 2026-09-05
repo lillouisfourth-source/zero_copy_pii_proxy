@@ -53,8 +53,9 @@ config:
 
 networkPolicy:
   enabled: true
-  egressCidrs: []
+  coreDnsCidr: "10.96.0.10/32"
+  kmsVpcEndpointCidr: "10.0.0.0/16"
+  upstreamApiCidr: "0.0.0.0/0"
 
 secrets:
   authTokens: "replace-me"
-  proxyPrivateKey: ""

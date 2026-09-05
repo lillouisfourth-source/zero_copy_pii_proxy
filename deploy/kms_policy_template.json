@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowDecryptFromApprovedNitroEnclave",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEqualsIgnoreCase": {
+          "kms:RecipientAttestation:ImageSha384": "PCR0_HASH_PLACEHOLDER"
+        }
+      }
+    }
+  ]
+}

@@ -140,7 +140,6 @@ jobs:
             --set image.tag=test \
             --set config.upstreamApiUrl=http://pii-mock:443 \
             --set-string secrets.authTokens=test_key \
-            --set-string secrets.proxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
             --set podSecurityContext.runAsNonRoot=true \
             --set containerSecurityContext.readOnlyRootFilesystem=true \
             --set containerSecurityContext.allowPrivilegeEscalation=false \
