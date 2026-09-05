@@ -1,9 +1,14 @@
-use axum::{body::Body, extract::State, http::StatusCode, response::Response, routing::post, Router};
+use axum::{
+    body::Body, extract::State, http::StatusCode, response::Response, routing::post, Router,
+};
 use bytes::Bytes;
 use futures::StreamExt;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use reqwest::Client;
-use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use zero_copy_pii_proxy::engine::PiiVault;
@@ -53,7 +58,10 @@ async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
         client: Client::new(),
         vault: initial_vault,
         engine_state: Arc::new(arc_swap::ArcSwap::from_pointee(initial_state)),
-        auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(vec![*blake3::hash(api_key.as_bytes()).as_bytes()])),
+        auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(vec![*blake3::hash(
+            api_key.as_bytes(),
+        )
+        .as_bytes()])),
         upstream_url: format!("http://{}", upstream_addr),
         allowed_origins: Vec::new(),
         prometheus_handle,
@@ -65,7 +73,11 @@ async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
     };
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(proxy_listener, make_router(state)).await.unwrap() });
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, make_router(state))
+            .await
+            .unwrap()
+    });
 
     let client = Client::new();
     let proxy_url = format!("http://{}/v1/chat/completions", proxy_addr);
@@ -88,8 +100,14 @@ async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
     assert_eq!(control.status(), StatusCode::OK);
 
     let second = request().send().await.unwrap().text().await.unwrap();
-    assert!(second.contains("[REDACTED]"), "stream 2 was not redacted: {second}");
-    assert!(!second.contains("beta"), "stream 2 leaked pattern B: {second}");
+    assert!(
+        second.contains("[REDACTED]"),
+        "stream 2 was not redacted: {second}"
+    );
+    assert!(
+        !second.contains("beta"),
+        "stream 2 leaked pattern B: {second}"
+    );
 
     release_first.send(()).unwrap();
     let first_body = first.collect::<Vec<_>>().await;
@@ -98,6 +116,12 @@ async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
         .flat_map(|result| result.unwrap().to_vec())
         .collect::<Vec<_>>();
     let first_text = String::from_utf8(first_bytes).unwrap();
-    assert!(first_text.contains("[REDACTED]"), "stream 1 was not redacted: {first_text}");
-    assert!(!first_text.contains("alpha"), "stream 1 leaked pattern A: {first_text}");
+    assert!(
+        first_text.contains("[REDACTED]"),
+        "stream 1 was not redacted: {first_text}"
+    );
+    assert!(
+        !first_text.contains("alpha"),
+        "stream 1 leaked pattern A: {first_text}"
+    );
 }

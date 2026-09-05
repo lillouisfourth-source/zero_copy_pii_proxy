@@ -48,7 +48,11 @@ mod vsock {
         pub async fn connect(cid: u32, port: u32) -> Result<Self> {
             // On Linux: open /dev/vsock, connect to AF_VSOCK address
             // This is a stub; full implementation requires AF_VSOCK socket setup
-            todo!("Implement AF_VSOCK connection for CID={}, PORT={}", cid, port)
+            todo!(
+                "Implement AF_VSOCK connection for CID={}, PORT={}",
+                cid,
+                port
+            )
         }
     }
 }
@@ -150,16 +154,14 @@ async fn bridge_connection(
 }
 
 /// Connect to Nitro Enclave via VSOCK
-/// 
+///
 /// On Linux with Nitro support:
 ///   Returns a TokioTcpStream equivalent connected to VSOCK://<CID>:<PORT>
-/// 
+///
 /// On non-Linux platforms:
 ///   Returns an error (VSOCK is Linux-only)
 #[cfg(target_os = "linux")]
-async fn connect_to_enclave(
-    config: &BridgeConfig,
-) -> Result<TokioTcpStream, String> {
+async fn connect_to_enclave(config: &BridgeConfig) -> Result<TokioTcpStream, String> {
     // On Linux with AWS Nitro:
     // AF_VSOCK requires special setup. This is a stub implementation.
     // Real implementation would:
@@ -178,9 +180,7 @@ async fn connect_to_enclave(
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn connect_to_enclave(
-    _config: &BridgeConfig,
-) -> Result<TokioTcpStream, String> {
+async fn connect_to_enclave(_config: &BridgeConfig) -> Result<TokioTcpStream, String> {
     Err("VSOCK is only supported on Linux. This binary must run on an EC2 instance with Nitro Enclave support."
         .to_string())
 }
@@ -262,14 +262,22 @@ fn parse_args() -> Result<BridgeConfig, String> {
                 if i >= args.len() {
                     return Err("Missing value for --enclave-port".to_string());
                 }
-                enclave_port = Some(args[i].parse().map_err(|_| "Failed to parse enclave-port")?);
+                enclave_port = Some(
+                    args[i]
+                        .parse()
+                        .map_err(|_| "Failed to parse enclave-port")?,
+                );
             }
             "--listen" => {
                 i += 1;
                 if i >= args.len() {
                     return Err("Missing value for --listen".to_string());
                 }
-                listen_addr = Some(args[i].parse().map_err(|_| "Failed to parse listen address")?);
+                listen_addr = Some(
+                    args[i]
+                        .parse()
+                        .map_err(|_| "Failed to parse listen address")?,
+                );
             }
             "--help" => {
                 println!(
@@ -304,7 +312,9 @@ This binary must execute on an EC2 instance with Nitro Enclave support.
         enclave_cid: enclave_cid.unwrap_or(3),
         enclave_port: enclave_port.unwrap_or(3000),
         listen_addr: listen_addr.unwrap_or_else(|| {
-            "0.0.0.0:3000".parse().expect("Failed to parse default listen address")
+            "0.0.0.0:3000"
+                .parse()
+                .expect("Failed to parse default listen address")
         }),
     })
 }

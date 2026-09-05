@@ -9,10 +9,10 @@ pub mod vsock_bridge;
 #[cfg(feature = "host-bridge")]
 pub mod vsock_host_bridge;
 
+pub use crate::budget_queue::TenantBudget;
 use crate::budget_queue::{
     channel, enqueue, BudgetError, BudgetedBody, ByteBudget, EnqueueError, GLOBAL_MEMORY_CHUNK,
 };
-pub use crate::budget_queue::TenantBudget;
 use crate::engine::{EngineState, OutputSegment, PiiVault, StreamRedactor};
 use base64::engine::general_purpose::STANDARD as B64Std;
 use base64::Engine;
@@ -249,7 +249,10 @@ async fn update_rules(
     let compiled = tokio::task::spawn_blocking(move || {
         EngineState::new(
             &patterns,
-            &patterns.iter().map(|_| "[REDACTED]".to_string()).collect::<Vec<_>>(),
+            &patterns
+                .iter()
+                .map(|_| "[REDACTED]".to_string())
+                .collect::<Vec<_>>(),
         )
     })
     .await;

@@ -1,8 +1,8 @@
 use aho_corasick::AhoCorasick;
 use bytes::{Bytes, BytesMut};
 use serde_json;
-use std::sync::Arc;
 use std::str::Utf8Error;
+use std::sync::Arc;
 
 const DEFAULT_MAX_BUFFER_CAPACITY: usize = 64 * 1024;
 
@@ -198,7 +198,10 @@ impl PiiVault {
             })
             .collect::<Vec<_>>();
         let engine_state = Arc::new(EngineState::new(
-            &patterns.iter().map(|pattern| (*pattern).to_string()).collect::<Vec<_>>(),
+            &patterns
+                .iter()
+                .map(|pattern| (*pattern).to_string())
+                .collect::<Vec<_>>(),
             &replacement_strings,
         ));
         Self {

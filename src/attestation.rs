@@ -72,22 +72,18 @@ impl KmsProvider for NitroKmsProvider {
         crate::vsock_bridge::spawn_enclave_tunnels().await;
         std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:8000");
         std::env::set_var("https_proxy", "http://127.0.0.1:8000");
-        std::env::set_var(
-            "AWS_EC2_METADATA_SERVICE_ENDPOINT",
-            "http://127.0.0.1:8001",
-        );
+        std::env::set_var("AWS_EC2_METADATA_SERVICE_ENDPOINT", "http://127.0.0.1:8001");
 
         let config = aws_config::load_from_env().await;
         let client = aws_sdk_kms::Client::new(&config);
         let (private_key, public_key_der) = tokio::task::spawn_blocking(|| {
             let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 3072)
                 .map_err(|error| format!("Failed to generate RSA keypair: {error}"))?;
-            let public_key_der = rsa::spki::EncodePublicKey::to_public_key_der(
-                &private_key.to_public_key(),
-            )
-            .map_err(|error| format!("Failed to encode SPKI public key: {error}"))?
-            .as_bytes()
-            .to_vec();
+            let public_key_der =
+                rsa::spki::EncodePublicKey::to_public_key_der(&private_key.to_public_key())
+                    .map_err(|error| format!("Failed to encode SPKI public key: {error}"))?
+                    .as_bytes()
+                    .to_vec();
             Ok::<_, String>((private_key, public_key_der))
         })
         .await
@@ -114,9 +110,7 @@ impl KmsProvider for NitroKmsProvider {
         };
 
         let recipient = aws_sdk_kms::types::RecipientInfo::builder()
-            .key_encryption_algorithm(
-                aws_sdk_kms::types::KeyEncryptionMechanism::RsaesOaepSha256,
-            )
+            .key_encryption_algorithm(aws_sdk_kms::types::KeyEncryptionMechanism::RsaesOaepSha256)
             .attestation_document(aws_smithy_types::Blob::new(attestation_document))
             .build();
         let response = client

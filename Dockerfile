@@ -35,11 +35,9 @@ COPY fuzz ./fuzz
 
 # Build static binary for x86_64-unknown-linux-musl
 # This produces a fully static executable with zero runtime dependencies
-RUN cargo build --release \
+RUN RUSTFLAGS="${RUSTFLAGS} -C debuginfo=0 -C strip=symbols" cargo build --release \
     --target x86_64-unknown-linux-musl \
-    --locked \
-    -Z build-std=std,panic_abort \
-    -Z build-std-features=panic_immediate_abort
+    --locked
 
 # Verify binary is static (no dynamic library dependencies)
 RUN ldd /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy || \

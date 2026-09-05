@@ -48,10 +48,7 @@ pub async fn run_host_vsock_relay(
     }
 }
 
-async fn relay_connect_connection(
-    vsock: VsockStream,
-    fallback_host: &str,
-) -> Result<(), String> {
+async fn relay_connect_connection(vsock: VsockStream, fallback_host: &str) -> Result<(), String> {
     let mut buffered_vsock = BufReader::new(vsock);
     let requested_host = read_connect_target(&mut buffered_vsock).await?;
     validate_kms_host(&requested_host)?;

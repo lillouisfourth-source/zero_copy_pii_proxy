@@ -6,7 +6,9 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use zero_copy_pii_proxy::budget_queue::{ByteBudget, DEFAULT_GLOBAL_MEMORY_BUDGET, TENANT_MEMORY_BUDGET};
+use zero_copy_pii_proxy::budget_queue::{
+    ByteBudget, DEFAULT_GLOBAL_MEMORY_BUDGET, TENANT_MEMORY_BUDGET,
+};
 use zero_copy_pii_proxy::engine::PiiVault;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
@@ -25,7 +27,7 @@ async fn slowloris_split_chunk_pii_attack() {
 
     // Create policy with SSN pattern
     let _policy = PiiVault::new(
-        &["123-45-6789"],  // Example SSN pattern
+        &["123-45-6789"], // Example SSN pattern
         &["[REDACTED]"],
     );
 
@@ -62,7 +64,7 @@ async fn slowloris_split_chunk_pii_attack() {
                 tenant_id,
                 tenant_budgets.clone(),
                 global_memory.clone(),
-                2 * 1024 * 1024,  // 2 MiB per request
+                2 * 1024 * 1024, // 2 MiB per request
             );
 
             let start = std::time::Instant::now();
@@ -157,7 +159,7 @@ async fn slowloris_split_chunk_pii_attack() {
     let chunk2 = Bytes::from("45-6789\", \"keep\": \"secret\"}");
 
     let policy = PiiVault::new(
-        &["123-45-6789"],  // Exact literal pattern
+        &["123-45-6789"], // Exact literal pattern
         &["[REDACTED]"],
     );
 
@@ -204,7 +206,7 @@ async fn slowloris_split_chunk_pii_attack() {
         let used = TENANT_MEMORY_BUDGET.saturating_sub(available);
         println!(
             "  Tenant {:?}: {}/{} bytes used",
-            hex::encode(&tenant_id[..8]),  // Show first 8 bytes as hex
+            hex::encode(&tenant_id[..8]), // Show first 8 bytes as hex
             used,
             TENANT_MEMORY_BUDGET
         );
@@ -255,7 +257,10 @@ async fn slowloris_split_chunk_pii_attack() {
     println!("  ✓ Duration: {:.2}s", elapsed.as_secs_f64());
     println!("  ✓ Total bytes attempted: {}", total_bytes_attempted);
     println!("  ✓ Budget exhausted: {} / 1000", budget_exhausted_count);
-    println!("  ✓ Global memory used: {}/{}", global_used, DEFAULT_GLOBAL_MEMORY_BUDGET);
+    println!(
+        "  ✓ Global memory used: {}/{}",
+        global_used, DEFAULT_GLOBAL_MEMORY_BUDGET
+    );
     println!("  ✓ Split-chunk PII redaction: PASSED");
     println!("  ✓ No OOM panic: PASSED");
     println!("  ✓ Graceful load shedding: PASSED");

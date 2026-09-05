@@ -194,8 +194,9 @@ async fn build_upstream_client() -> Client {
             .await
             .expect("failed to decrypt LocalStack fixture; refusing unauthenticated boot");
         let mut headers = HeaderMap::new();
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", secret.expose_secret()))
-            .expect("LocalStack API key produced an invalid Authorization header");
+        let mut authorization =
+            HeaderValue::from_str(&format!("Bearer {}", secret.expose_secret()))
+                .expect("LocalStack API key produced an invalid Authorization header");
         authorization.set_sensitive(true);
         headers.insert(AUTHORIZATION, authorization);
         return Client::builder()
@@ -216,8 +217,9 @@ async fn build_upstream_client() -> Client {
             .await
             .expect("failed to decrypt Nitro secret; refusing unauthenticated boot");
         let mut headers = HeaderMap::new();
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", secret.expose_secret()))
-            .expect("Nitro API key produced an invalid Authorization header");
+        let mut authorization =
+            HeaderValue::from_str(&format!("Bearer {}", secret.expose_secret()))
+                .expect("Nitro API key produced an invalid Authorization header");
         authorization.set_sensitive(true);
         headers.insert(AUTHORIZATION, authorization);
         return Client::builder()
@@ -244,7 +246,9 @@ async fn read_localstack_ciphertext() -> Vec<u8> {
                 tracing::warn!(attempt, %error, "waiting for LocalStack ciphertext fixture");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
-            Err(error) => panic!("LocalStack ciphertext fixture unavailable after 10 attempts: {error}"),
+            Err(error) => {
+                panic!("LocalStack ciphertext fixture unavailable after 10 attempts: {error}")
+            }
         }
     }
     unreachable!()
