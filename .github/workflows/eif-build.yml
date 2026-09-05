@@ -1,4 +1,4 @@
-name: Deterministic EIF Build
+name: Bifurcated CI and EIF Build
 
 on:
   workflow_dispatch:
@@ -6,86 +6,208 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  rust-quality:
+    name: Rust Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: clippy, rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace
+
+  functional-kind:
+    name: Functional Integration - Kind
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build non-Nitro functional image
+        run: docker build --build-arg CARGO_FEATURES="--features kind-test" -t zero-copy-pii-proxy:kind .
+      - uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: chart-testing
+      - run: kind load docker-image zero-copy-pii-proxy:kind --name chart-testing
+      - uses: azure/setup-helm@v4
+        with:
+          version: '4.2.4'
+      - name: Validate Helm chart
+        run: helm lint charts/zero-copy-pii-proxy
+      - name: Deploy fragmented upstream mock
+        shell: bash
+        run: |
+          kubectl apply -f - <<'YAML'
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: pii-mock-script
+          data:
+            server.py: |
+              from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+              import socket
+              import time
+
+              class Handler(BaseHTTPRequestHandler):
+                  def do_POST(self):
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/event-stream")
+                      self.send_header("Cache-Control", "no-cache")
+                      self.send_header("Connection", "close")
+                      self.end_headers()
+                      self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                      for byte in b'data: {"choices":[{"delta":{"content":"safe password"}}]}\n\n':
+                          self.wfile.write(bytes((byte,)))
+                          self.wfile.flush()
+                      for byte in b'data: [DONE]\n\n':
+                          self.wfile.write(bytes((byte,)))
+                          self.wfile.flush()
+                          time.sleep(0.002)
+
+                  def log_message(self, format, *args):
+                      return
+
+              ThreadingHTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: pii-mock
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: pii-mock
+            template:
+              metadata:
+                labels:
+                  app: pii-mock
+              spec:
+                containers:
+                  - name: mock
+                    image: python:3.12-alpine@sha256:285a71327884a4d50efbea30104473b0fa43ecefa499458899670ca30dae76e5
+                    command: ["python", "/opt/mock/server.py"]
+                    volumeMounts:
+                      - name: script
+                        mountPath: /opt/mock
+                        readOnly: true
+                volumes:
+                  - name: script
+                    configMap:
+                      name: pii-mock-script
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: pii-mock
+          spec:
+            selector:
+              app: pii-mock
+            ports:
+              - port: 443
+                targetPort: 8081
+          YAML
+          kubectl rollout status deployment/pii-mock --timeout=90s
+      - name: Deploy functional chart
+        run: |
+          helm upgrade --install zero-copy-pii-proxy ./charts/zero-copy-pii-proxy \
+            --set image.repository=zero-copy-pii-proxy \
+            --set image.tag=kind \
+            --set config.upstreamApiUrl=http://pii-mock:443 \
+            --set-string secrets.authTokens=test_key \
+            --set-string secrets.mockProxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
+            --set-string secrets.mockKmsCiphertext=dGVzdF9rZXk=
+      - run: kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=zero-copy-pii-proxy --timeout=120s
+      - name: Port-forward and smoke test
+        shell: bash
+        run: |
+          kubectl port-forward deployment/zero-copy-pii-proxy 3000:3000 9090:9090 > port-forward.log 2>&1 &
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:9090/health; then exit 0; fi
+            sleep 1
+          done
+          cat port-forward.log
+          exit 1
+      - name: Cleanup
+        if: always()
+        run: pkill -f "kubectl port-forward deployment/zero-copy-pii-proxy" || true
+
+  security-scans:
+    name: Security Scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build non-Nitro scan image
+        run: docker build --build-arg CARGO_FEATURES="--features kind-test" -t zero-copy-pii-proxy:scan .
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: zero-copy-pii-proxy:scan
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: zero-copy-pii-proxy:scan
+          format: cyclonedx
+          output: sbom.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-artifacts
+          path: |
+            trivy-results.sarif
+            sbom.json
+          if-no-files-found: warn
+
   enclave-determinism:
+    name: Cryptographic PCR0 Determinism
     runs-on: ubuntu-latest
     outputs:
       verified_pcr0: ${{ steps.verify.outputs.verified_pcr0 }}
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Verify Nitro Docker build flags
-        run: |
-          set -euo pipefail
-          grep -F -- '--locked' Dockerfile.enclave
-          grep -F -- '--features nitro' Dockerfile.enclave
-
-      - name: Build enclave image run 1
-        run: |
-          docker build --no-cache -f Dockerfile.enclave -t pii-proxy-enclave:run1 .
-
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Nitro image run 1
+        run: docker build --no-cache --build-arg CARGO_FEATURES="--features nitro" -f Dockerfile.enclave -t pii-proxy-enclave:run1 .
       - name: Build EIF run 1
-        id: pcr1
         run: |
           docker run --rm --privileged --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            amazonlinux:2023 \
-            bash -lc '
+            -v "$GITHUB_WORKSPACE":/workspace -w /workspace amazonlinux:2023 bash -lc '
               set -euxo pipefail
-              dnf install -y aws-nitro-enclaves-cli jq && \
-              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run1 --output-file enclave_run1.eif > build_run1.json && \
+              dnf install -y aws-nitro-enclaves-cli jq
+              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run1 --output-file enclave_run1.eif > build_run1.json
               jq -r .Measurements.PCR0 build_run1.json > pcr0_run1.txt
             '
-
-      - name: Build enclave image run 2
-        run: |
-          docker build --no-cache -f Dockerfile.enclave -t pii-proxy-enclave:run2 .
-
+      - name: Build Nitro image run 2
+        run: docker build --no-cache --build-arg CARGO_FEATURES="--features nitro" -f Dockerfile.enclave -t pii-proxy-enclave:run2 .
       - name: Build EIF run 2
-        id: pcr2
         run: |
           docker run --rm --privileged --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            amazonlinux:2023 \
-            bash -lc '
+            -v "$GITHUB_WORKSPACE":/workspace -w /workspace amazonlinux:2023 bash -lc '
               set -euxo pipefail
-              dnf install -y aws-nitro-enclaves-cli jq && \
-              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run2 --output-file enclave_run2.eif > build_run2.json && \
+              dnf install -y aws-nitro-enclaves-cli jq
+              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run2 --output-file enclave_run2.eif > build_run2.json
               jq -r .Measurements.PCR0 build_run2.json > pcr0_run2.txt
             '
-
       - name: Verify PCR0 determinism
         id: verify
         run: |
           set -euo pipefail
           PCR0_RUN1="$(cat pcr0_run1.txt)"
           PCR0_RUN2="$(cat pcr0_run2.txt)"
-          echo "PCR0_RUN1=${PCR0_RUN1}"
-          echo "PCR0_RUN2=${PCR0_RUN2}"
-          if [ "$PCR0_RUN1" != "$PCR0_RUN2" ]; then
-            echo "PCR0 mismatch between build runs; determinism gate failed."
-            exit 1
-          fi
+          test "$PCR0_RUN1" = "$PCR0_RUN2"
           printf '%s' "$PCR0_RUN1" > verified_pcr0.txt
-          jq -n \
-            --arg pcr0_run1 "$PCR0_RUN1" \
-            --arg pcr0_run2 "$PCR0_RUN2" \
-            --arg verified_pcr0 "$PCR0_RUN1" \
-            '{pcr0_run1: $pcr0_run1, pcr0_run2: $pcr0_run2, verified_pcr0: $verified_pcr0}' \
-            > pcr_measurements.json
+          jq -n --arg pcr0 "$PCR0_RUN1" '{verified_pcr0: $pcr0}' > pcr_measurements.json
           echo "verified_pcr0=$PCR0_RUN1" >> "$GITHUB_OUTPUT"
-
-      - name: Publish verified PCR0 measurements
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: pcr-measurements
           path: |

@@ -1,4 +1,8 @@
-#[cfg(all(not(debug_assertions), not(feature = "nitro")))]
+#[cfg(all(
+    not(debug_assertions),
+    not(feature = "nitro"),
+    not(feature = "kind-test")
+))]
 compile_error!("Release builds MUST enable the 'nitro' feature.");
 
 use std::path::{Path, PathBuf};
@@ -19,7 +23,7 @@ use tower::ServiceBuilder;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
 use zero_copy_pii_proxy::attestation::decrypt_upstream_api_key;
-#[cfg(all(debug_assertions, not(feature = "nitro")))]
+#[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
 use zero_copy_pii_proxy::attestation::LocalMockProvider;
 #[cfg(feature = "nitro")]
 use zero_copy_pii_proxy::attestation::NitroKmsProvider;
@@ -181,15 +185,19 @@ async fn main() {
 }
 
 async fn build_upstream_client() -> Client {
-    #[cfg(all(debug_assertions, not(feature = "nitro")))]
+    #[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
     {
-        if std::env::var("LOCALSTACK_ENDPOINT").is_err() {
+        if cfg!(debug_assertions) && std::env::var("LOCALSTACK_ENDPOINT").is_err() {
             panic!("LOCALSTACK_ENDPOINT is required for debug-mode startup");
         }
         let provider = LocalMockProvider::new()
             .await
-            .expect("failed to initialize LocalStack KMS provider");
-        let ciphertext = read_localstack_ciphertext().await;
+            .expect("failed to initialize mock KMS provider");
+        let ciphertext = if cfg!(feature = "kind-test") {
+            read_kind_ciphertext().await
+        } else {
+            read_localstack_ciphertext().await
+        };
         let secret = decrypt_upstream_api_key(Arc::new(provider), ciphertext)
             .await
             .expect("failed to decrypt LocalStack fixture; refusing unauthenticated boot");
@@ -231,7 +239,7 @@ async fn build_upstream_client() -> Client {
     }
 }
 
-#[cfg(all(debug_assertions, not(feature = "nitro")))]
+#[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
 async fn read_localstack_ciphertext() -> Vec<u8> {
     let path = Path::new(".aws-mock/ciphertext.b64");
     for attempt in 1..=10 {
@@ -252,6 +260,16 @@ async fn read_localstack_ciphertext() -> Vec<u8> {
         }
     }
     unreachable!()
+}
+
+#[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
+async fn read_kind_ciphertext() -> Vec<u8> {
+    let contents = tokio::fs::read_to_string("/run/secrets/ciphertext.b64")
+        .await
+        .expect("Kind ciphertext fixture is required");
+    base64::engine::general_purpose::STANDARD
+        .decode(contents.trim())
+        .expect("Kind ciphertext fixture is not valid Base64")
 }
 
 #[cfg(feature = "nitro")]

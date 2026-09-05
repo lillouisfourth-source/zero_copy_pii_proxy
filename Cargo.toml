@@ -62,6 +62,7 @@ nitro = [
 	"dep:base64",
 ]
 host-bridge = ["dep:tokio-vsock"]
+kind-test = ["dep:base64"]
 
 [dev-dependencies]
 criterion = "0.8.2"

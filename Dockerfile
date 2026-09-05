@@ -24,6 +24,8 @@ ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 WORKDIR /build
 
+ARG CARGO_FEATURES="--features kind-test"
+
 # Copy manifests
 COPY Cargo.toml Cargo.lock ./
 
@@ -38,7 +40,7 @@ COPY fuzz ./fuzz
 RUN RUSTFLAGS="${RUSTFLAGS} -C debuginfo=0 -C strip=symbols" cargo build --release \
     --target x86_64-unknown-linux-musl \
     --locked \
-    --features nitro
+    ${CARGO_FEATURES}
 
 # Verify binary is static (no dynamic library dependencies)
 RUN ldd /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy || \

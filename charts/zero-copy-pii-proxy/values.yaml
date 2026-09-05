@@ -59,3 +59,5 @@ networkPolicy:
 
 secrets:
   authTokens: "replace-me"
+  mockProxyPrivateKey: ""
+  mockKmsCiphertext: ""

@@ -8,14 +8,23 @@ pub trait KmsProvider: Send + Sync {
     async fn decrypt(&self, ciphertext: Vec<u8>) -> Result<SecretString, String>;
 }
 
-#[cfg(all(debug_assertions, not(feature = "nitro")))]
+#[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
 pub struct LocalMockProvider {
     client: aws_sdk_kms::Client,
 }
 
-#[cfg(all(debug_assertions, not(feature = "nitro")))]
+#[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
 impl LocalMockProvider {
     pub async fn new() -> Result<Self, String> {
+        if cfg!(feature = "kind-test") {
+            return Ok(Self {
+                client: aws_sdk_kms::Client::from_conf(
+                    aws_sdk_kms::Config::builder()
+                        .behavior_version_latest()
+                        .build(),
+                ),
+            });
+        }
         let endpoint = std::env::var("LOCALSTACK_ENDPOINT")
             .map_err(|_| "LOCALSTACK_ENDPOINT is required for LocalMockProvider".to_string())?;
         let region = std::env::var("AWS_DEFAULT_REGION")
@@ -32,10 +41,15 @@ impl LocalMockProvider {
     }
 }
 
-#[cfg(all(debug_assertions, not(feature = "nitro")))]
+#[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
 #[async_trait]
 impl KmsProvider for LocalMockProvider {
     async fn decrypt(&self, ciphertext: Vec<u8>) -> Result<SecretString, String> {
+        if cfg!(feature = "kind-test") {
+            let plaintext = String::from_utf8(ciphertext)
+                .map_err(|_| "Kind mock plaintext was not valid UTF-8".to_string())?;
+            return Ok(SecretString::new(plaintext.into_boxed_str()));
+        }
         let response = self
             .client
             .decrypt()

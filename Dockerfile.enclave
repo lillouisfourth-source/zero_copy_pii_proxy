@@ -5,13 +5,14 @@ ENV SOURCE_DATE_EPOCH=1
 ENV RUSTFLAGS="--remap-path-prefix=/build=/workspace"
 
 WORKDIR /build
+ARG CARGO_FEATURES=""
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
 RUN RUSTFLAGS="${RUSTFLAGS} -C debuginfo=0 -C strip=symbols" cargo build --release \
     --target x86_64-unknown-linux-musl \
     --locked \
-    --features nitro \
+    ${CARGO_FEATURES} \
     --bin zero_copy_pii_proxy
 
 FROM scratch
