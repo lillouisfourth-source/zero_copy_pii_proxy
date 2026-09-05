@@ -3,9 +3,6 @@ use secrecy::SecretString;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-#[cfg(feature = "nitro")]
-use base64::Engine as _;
-
 #[async_trait]
 pub trait KmsProvider: Send + Sync {
     async fn decrypt(&self, ciphertext: Vec<u8>) -> Result<SecretString, String>;
@@ -74,13 +71,13 @@ impl KmsProvider for NitroKmsProvider {
         std::env::set_var("https_proxy", "http://127.0.0.1:8000");
         std::env::set_var("AWS_EC2_METADATA_SERVICE_ENDPOINT", "http://127.0.0.1:8001");
 
-        let config = aws_config::load_from_env().await;
+        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = aws_sdk_kms::Client::new(&config);
         let (private_key, public_key_der) = tokio::task::spawn_blocking(|| {
             let private_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 3072)
                 .map_err(|error| format!("Failed to generate RSA keypair: {error}"))?;
             let public_key_der =
-                rsa::spki::EncodePublicKey::to_public_key_der(&private_key.to_public_key())
+                rsa::pkcs8::EncodePublicKey::to_public_key_der(&private_key.to_public_key())
                     .map_err(|error| format!("Failed to encode SPKI public key: {error}"))?
                     .as_bytes()
                     .to_vec();

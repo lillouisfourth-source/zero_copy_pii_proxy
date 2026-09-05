@@ -204,7 +204,7 @@ async fn build_upstream_client() -> Client {
             .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Duration::from_secs(30))
             .build()
-            .expect("failed to build upstream HTTP client");
+            .expect("failed to build upstream HTTP client")
     }
 
     #[cfg(feature = "nitro")]
@@ -227,7 +227,7 @@ async fn build_upstream_client() -> Client {
             .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Duration::from_secs(30))
             .build()
-            .expect("failed to build upstream HTTP client");
+            .expect("failed to build upstream HTTP client")
     }
 }
 
