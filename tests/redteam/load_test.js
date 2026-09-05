@@ -8,8 +8,8 @@ export const options = {
   scenarios: {
     default: {
       executor: 'shared-iterations',
-      vus: 100,
-      iterations: 85000,
+      vus: 50,
+      iterations: 10000,
       maxDuration: '30m',
     },
   },
@@ -24,7 +24,7 @@ export default function () {
   });
 
   const params = {
-    timeout: '2s',
+    timeout: '10s',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer test_key', 

@@ -44,6 +44,22 @@ jobs:
         uses: helm/kind-action@v1.12.0
       - name: Load image into kind
         run: kind load docker-image zero-copy-pii-proxy:test --name chart-testing
+      - name: Scan Docker Image for Vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: 'zero-copy-pii-proxy:test'
+          version: 'v0.74.0'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
+      - name: Generate Docker Image SBOM
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: 'zero-copy-pii-proxy:test'
+          version: 'v0.74.0'
+          format: 'cyclonedx'
+          output: 'sbom.json'
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
@@ -180,25 +196,8 @@ jobs:
         shell: bash
         run: |
           pkill -f "kubectl port-forward deployment/zero-copy-pii-proxy" || true
-      - name: Scan Docker Image for Vulnerabilities
-        if: success()
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        with:
-          image-ref: 'zero-copy-pii-proxy:test'
-          version: 'v0.74.0'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          exit-code: '1'
-          severity: 'HIGH,CRITICAL'
-      - name: Generate Docker Image SBOM
-        if: success()
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        with:
-          image-ref: 'zero-copy-pii-proxy:test'
-          version: 'v0.74.0'
-          format: 'cyclonedx'
-          output: 'sbom.json'
       - name: Upload security artifacts
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: security-artifacts
