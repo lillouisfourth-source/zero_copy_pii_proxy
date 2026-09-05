@@ -82,33 +82,49 @@ jobs:
 
               class Handler(BaseHTTPRequestHandler):
                   def do_POST(self):
-                      # Drain the request before writing the response to avoid a socket deadlock.
-                      if "Content-Length" in self.headers:
-                          length = int(self.headers["Content-Length"])
-                          self.rfile.read(length)
-                      elif self.headers.get("Transfer-Encoding", "").lower() == "chunked":
-                          while True:
-                              line = self.rfile.readline()
-                              if not line:
-                                  break
-                              chunk_size = int(line.split(b";", 1)[0], 16)
-                              if chunk_size == 0:
-                                  self.rfile.readline()
-                                  break
-                              self.rfile.read(chunk_size)
-                              self.rfile.readline()
+                    import sys
+                    print("--- INCOMING REQUEST ---", file=sys.stderr, flush=True)
+                    for key, value in self.headers.items():
+                      print(f"{key}: {value}", file=sys.stderr, flush=True)
 
-                      self.send_response(200)
-                      self.send_header("Content-Type", "text/event-stream")
-                      self.send_header("Cache-Control", "no-cache")
-                      self.send_header("Connection", "close")
-                      self.end_headers()
+                    try:
+                      if "Content-Length" in self.headers:
+                        length = int(self.headers["Content-Length"])
+                        print(f"Draining {length} bytes...", file=sys.stderr, flush=True)
+                        self.rfile.read(length)
+                      elif self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+                        print("Draining chunked stream...", file=sys.stderr, flush=True)
+                        while True:
+                          line = self.rfile.readline().strip()
+                          if not line:
+                            break
+                          chunk_size = int(line.split(b";", 1)[0], 16)
+                          if chunk_size == 0:
+                            self.rfile.readline()
+                            break
+                          self.rfile.read(chunk_size)
+                          self.rfile.readline()
+                      print("Request body drained successfully.", file=sys.stderr, flush=True)
+                    except Exception as error:
+                      print(f"Drain error: {error}", file=sys.stderr, flush=True)
+
+                    print("Writing response...", file=sys.stderr, flush=True)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+
+                    try:
                       self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                       payload = b'data: {"content": "hello Alice and Bob", "role": "assistant"}\n\ndata: [DONE]\n\n'
                       for byte in payload:
-                          self.wfile.write(bytes((byte,)))
-                          self.wfile.flush()
-                          time.sleep(0.001)
+                        self.wfile.write(bytes((byte,)))
+                        self.wfile.flush()
+                        time.sleep(0.001)
+                      print("Response written successfully.", file=sys.stderr, flush=True)
+                    except Exception as error:
+                      print(f"Response error: {error}", file=sys.stderr, flush=True)
 
                   def log_message(self, format, *args):
                       return
@@ -189,6 +205,7 @@ jobs:
           exit 1
       - name: Verify Single Request Path
         run: |
+          kubectl delete networkpolicy --all || true
           curl --fail-with-body -sS -i -X POST \
             -H "Authorization: Bearer test_key" \
             -H "Content-Type: application/json" \
