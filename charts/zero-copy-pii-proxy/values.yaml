@@ -57,6 +57,8 @@ networkPolicy:
   kmsVpcEndpointCidr: "10.0.0.0/16"
   upstreamApiCidr: "0.0.0.0/0"
   upstreamApiPort: 443
+  mockEgressEnabled: false
+  mockEgressPort: 8081
 
 secrets:
   authTokens: "replace-me"

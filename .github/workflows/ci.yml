@@ -163,6 +163,8 @@ jobs:
             --set image.tag=test \
             --set config.upstreamApiUrl=http://pii-mock:443 \
             --set networkPolicy.upstreamApiPort=443 \
+            --set networkPolicy.mockEgressEnabled=true \
+            --set networkPolicy.mockEgressPort=8081 \
             --set-string secrets.authTokens=test_key \
             --set-string secrets.mockProxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
             --set-string secrets.mockKmsCiphertext=dGVzdF9rZXk= \
