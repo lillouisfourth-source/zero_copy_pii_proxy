@@ -54,6 +54,11 @@ spec:
             {{- end }}
             - name: PROXY_AUTH_FILE
               value: /etc/zero-copy-pii-proxy-auth/AUTH_TOKENS
+            - name: ADMIN_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
+                  key: ADMIN_BEARER_TOKEN
             {{- if .Values.secrets.mockProxyPrivateKey }}
             - name: PROXY_PRIVATE_KEY
               valueFrom:

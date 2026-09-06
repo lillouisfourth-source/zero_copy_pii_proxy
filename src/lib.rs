@@ -90,6 +90,7 @@ pub struct AppState {
     pub vault: Arc<arc_swap::ArcSwap<PiiVault>>,
     pub engine_state: Arc<arc_swap::ArcSwap<EngineState>>,
     pub auth_keyring: Arc<arc_swap::ArcSwap<Vec<[u8; 32]>>>,
+    pub admin_bearer_token_hash: [u8; 32],
     pub upstream_url: String,
     pub allowed_origins: Vec<String>,
     pub prometheus_handle: Arc<PrometheusHandle>,
@@ -372,11 +373,21 @@ async fn auth_middleware(
         return Err(StatusCode::UNAUTHORIZED);
     };
     let token_hash = blake3::hash(token.as_bytes());
-    let keyring = state.auth_keyring.load();
-    for valid_hash in keyring.iter() {
-        if token_hash.as_bytes().ct_eq(valid_hash).unwrap_u8() == 1 {
-            return Ok(next.run(req).await);
-        }
+    if token_hash
+        .as_bytes()
+        .ct_eq(&state.admin_bearer_token_hash)
+        .unwrap_u8()
+        == 1
+    {
+        return Ok(next.run(req).await);
+    }
+    if state
+        .auth_keyring
+        .load()
+        .iter()
+        .any(|valid_hash| token_hash.as_bytes().ct_eq(valid_hash).unwrap_u8() == 1)
+    {
+        return Err(StatusCode::FORBIDDEN);
     }
     Err(StatusCode::UNAUTHORIZED)
 }

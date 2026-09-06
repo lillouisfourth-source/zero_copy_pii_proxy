@@ -101,6 +101,10 @@ async fn main() {
         .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be readable"));
     let auth_keyring = Arc::new(ArcSwap::new(Arc::new(hash_keyring(&auth_source))));
     auth_source.zeroize();
+    let mut admin_bearer_token = std::env::var("ADMIN_BEARER_TOKEN")
+        .unwrap_or_else(|_| panic!("ADMIN_BEARER_TOKEN must be configured"));
+    let admin_bearer_token_hash = *blake3::hash(admin_bearer_token.as_bytes()).as_bytes();
+    admin_bearer_token.zeroize();
     let tenant_budgets = Arc::new(dashmap::DashMap::new());
 
     let client = build_upstream_client().await;
@@ -126,6 +130,7 @@ async fn main() {
         vault,
         engine_state,
         auth_keyring,
+        admin_bearer_token_hash,
         upstream_url,
         allowed_origins,
         prometheus_handle,

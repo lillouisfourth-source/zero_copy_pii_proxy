@@ -62,6 +62,7 @@ async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
             api_key.as_bytes(),
         )
         .as_bytes()])),
+        admin_bearer_token_hash: *blake3::hash(b"admin_key").as_bytes(),
         upstream_url: format!("http://{}", upstream_addr),
         allowed_origins: Vec::new(),
         prometheus_handle,
@@ -92,12 +93,21 @@ async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
 
     let control = client
         .post(format!("http://{}/_admin/rules", proxy_addr))
-        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Authorization", "Bearer admin_key")
         .json(&serde_json::json!({"patterns": ["beta"]}))
         .send()
         .await
         .unwrap();
     assert_eq!(control.status(), StatusCode::OK);
+
+    let tenant_control = client
+        .post(format!("http://{}/_admin/rules", proxy_addr))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&serde_json::json!({"patterns": ["gamma"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tenant_control.status(), StatusCode::FORBIDDEN);
 
     let second = request().send().await.unwrap().text().await.unwrap();
     assert!(
