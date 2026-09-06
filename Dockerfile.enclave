@@ -13,10 +13,11 @@ COPY src ./src
 RUN RUSTFLAGS="${RUSTFLAGS} -C debuginfo=0 -C strip=symbols" cargo build --release \
     --target x86_64-unknown-linux-musl \
     --locked \
-    --features nitro \
+    ${CARGO_FEATURES} \
     --bin zero_copy_pii_proxy
 
 RUN strip /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy
+RUN touch -d @${SOURCE_DATE_EPOCH} /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy
 
 FROM scratch
 ENV SOURCE_DATE_EPOCH=1704067200

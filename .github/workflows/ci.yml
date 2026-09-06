@@ -187,9 +187,9 @@ jobs:
       - name: Preflight mock DNS and TCP routing
         shell: bash
         run: |
-          PROXY_POD=$(kubectl get pod -l app.kubernetes.io/name=zero-copy-pii-proxy -o jsonpath='{.items[0].metadata.name}')
-          kubectl debug pod/${PROXY_POD} --image=busybox:1.36.1 --target=proxy --attach -- sh -c \
-            'nslookup pii-mock.default.svc.cluster.local && nc -vz pii-mock.default.svc.cluster.local 8081'
+          kubectl run preflight-dns --rm -i --restart=Never --image=busybox:1.36 \
+            --labels="app=proxy" -- sh -c \
+            "nslookup pii-mock.default.svc.cluster.local && nc -vz pii-mock.default.svc.cluster.local 8081"
       - name: Port-forward Helm deployment
         shell: bash
         run: |

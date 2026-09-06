@@ -1,5 +1,4 @@
 {{- if .Values.networkPolicy.enabled }}
-{{- $coreDnsCidr := required "A valid networkPolicy.coreDnsCidr is required for CoreDNS egress." .Values.networkPolicy.coreDnsCidr }}
 {{- $kmsVpcEndpointCidr := required "A valid networkPolicy.kmsVpcEndpointCidr is required for AWS KMS PrivateLink egress." .Values.networkPolicy.kmsVpcEndpointCidr }}
 {{- $upstreamApiCidr := required "A valid networkPolicy.upstreamApiCidr is required for upstream API egress." .Values.networkPolicy.upstreamApiCidr }}
 apiVersion: networking.k8s.io/v1
@@ -35,8 +34,12 @@ spec:
         - protocol: TCP
           port: 80
     - to:
-        - ipBlock:
-            cidr: {{ $coreDnsCidr | quote }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
       ports:
         - protocol: UDP
           port: 53
