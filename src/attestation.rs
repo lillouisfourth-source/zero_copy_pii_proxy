@@ -30,24 +30,34 @@ pub async fn attestation_document(public_key: &[u8; 32]) -> Result<Vec<u8>, Stri
 
     #[cfg(not(feature = "nitro"))]
     {
-        use serde::Serialize;
-        #[derive(Serialize)]
-        struct MockAttestation<'a> {
-            format: &'static str,
-            user_data: &'a [u8],
-            public_key: &'a [u8],
-            pcr0: String,
-            certificate: Vec<u8>,
-            cabundle: Vec<Vec<u8>>,
-        }
-        let document = MockAttestation {
-            format: "local-mock-not-nitro",
-            user_data: public_key,
-            public_key,
-            pcr0: std::env::var("MOCK_PCR0").unwrap_or_else(|_| "00".repeat(48)),
-            certificate: Vec::new(),
-            cabundle: Vec::new(),
-        };
+        let public_key = public_key.to_vec();
+        let pcr0 = std::env::var("MOCK_PCR0").unwrap_or_else(|_| "00".repeat(48));
+        let document = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("format".into()),
+                ciborium::Value::Text("local-mock-not-nitro".into()),
+            ),
+            (
+                ciborium::Value::Text("user_data".into()),
+                ciborium::Value::Bytes(public_key.clone()),
+            ),
+            (
+                ciborium::Value::Text("public_key".into()),
+                ciborium::Value::Bytes(public_key),
+            ),
+            (
+                ciborium::Value::Text("pcr0".into()),
+                ciborium::Value::Text(pcr0),
+            ),
+            (
+                ciborium::Value::Text("certificate".into()),
+                ciborium::Value::Bytes(Vec::new()),
+            ),
+            (
+                ciborium::Value::Text("cabundle".into()),
+                ciborium::Value::Array(Vec::new()),
+            ),
+        ]);
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&document, &mut encoded)
             .map_err(|error| format!("failed to encode mock attestation: {error}"))?;
