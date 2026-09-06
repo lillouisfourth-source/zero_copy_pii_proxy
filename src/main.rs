@@ -22,11 +22,11 @@ use tower::ServiceBuilder;
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
-use zero_copy_pii_proxy::attestation::decrypt_upstream_api_key;
 #[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
 use zero_copy_pii_proxy::attestation::LocalMockProvider;
 #[cfg(feature = "nitro")]
 use zero_copy_pii_proxy::attestation::NitroKmsProvider;
+use zero_copy_pii_proxy::attestation::{attestation_document, decrypt_upstream_api_key};
 use zero_copy_pii_proxy::engine::{EngineState, PiiVault};
 use zero_copy_pii_proxy::{active_sse_streams, make_metrics_router, make_router, AppState};
 
@@ -87,12 +87,12 @@ async fn main() {
         vault.load_full().engine_state.as_ref().clone(),
     ));
 
-    let proxy_private_key = std::env::var("PROXY_PRIVATE_KEY")
-        .ok()
-        .and_then(parse_private_key)
-        .unwrap_or_else(|| {
-            panic!("PROXY_PRIVATE_KEY must be configured as a valid 32-byte hex or base64 seed")
-        });
+    let proxy_private_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let attestation_document = Arc::new(
+        attestation_document(proxy_private_key.verifying_key().as_bytes())
+            .await
+            .expect("failed to obtain NSM attestation document"),
+    );
 
     let auth_file = std::env::var("PROXY_AUTH_FILE")
         .map(PathBuf::from)
@@ -131,6 +131,7 @@ async fn main() {
         engine_state,
         auth_keyring,
         admin_bearer_token_hash,
+        attestation_document,
         upstream_url,
         allowed_origins,
         prometheus_handle,
@@ -455,32 +456,6 @@ fn parse_pii_config(source: &str) -> (Vec<String>, Vec<String>) {
         }
     }
     (patterns, replacements)
-}
-
-fn parse_private_key(value: String) -> Option<SigningKey> {
-    let trimmed = value.trim();
-
-    let raw = if trimmed.len() == 64 {
-        match hex::decode(trimmed) {
-            Ok(bytes) => bytes,
-            Err(error) => panic!("PROXY_PRIVATE_KEY contains invalid hexadecimal data: {error}"),
-        }
-    } else {
-        match base64::engine::general_purpose::STANDARD.decode(trimmed) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                panic!("PROXY_PRIVATE_KEY must be a valid 32-byte hex or base64 seed: {error}")
-            }
-        }
-    };
-
-    if raw.len() != 32 {
-        panic!("PROXY_PRIVATE_KEY must decode to exactly 32 bytes");
-    }
-
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(&raw);
-    Some(SigningKey::from_bytes(&bytes))
 }
 
 fn watch_pii_config(

@@ -5,6 +5,7 @@ target/
 *.log
 **/*.rs.bk
 *.eif
+!enclave.eif
 *.json
 pcr0_*.txt
 binary_run*

@@ -1,32 +1,35 @@
 #!/usr/bin/env python3
 """Exercise the proxy and verify redaction, BLAKE3, and Ed25519 end to end."""
 
-# Dependencies: python -m pip install blake3 cryptography
+# Dependencies: python -m pip install blake3 cbor2 cryptography
 
 from __future__ import annotations
 
 import argparse
 import base64
 import json
+import sys
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from verify_receipt import decode_bytes, extract_attested_identity
 
 import blake3
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-
-def public_key_bytes(value: str) -> bytes:
-    raw = bytes.fromhex(value) if len(value) == 64 else base64.b64decode(value, validate=True)
-    if len(raw) != 32:
-        raise ValueError("public key must be 32 bytes")
-    return raw
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
     parser.add_argument("--api-key", required=True)
-    parser.add_argument("--public-key", required=True)
+    parser.add_argument("--attestation-url", required=True)
+    parser.add_argument("--expected-pcr0", required=True)
     args = parser.parse_args()
+
+    with urllib.request.urlopen(args.attestation_url, timeout=30) as attestation_response:
+        attestation_document = decode_bytes(attestation_response.read().decode("ascii"))
+    public_key = extract_attested_identity(attestation_document, args.expected_pcr0.lower(), None)
 
     body = json.dumps({
         "model": "ci-proof",
@@ -102,7 +105,7 @@ def main() -> int:
     if computed != declared_hash:
         raise AssertionError(f"BLAKE3 mismatch: computed {computed}, declared {declared_hash}")
 
-    Ed25519PublicKey.from_public_bytes(public_key_bytes(args.public_key)).verify(
+    Ed25519PublicKey.from_public_bytes(public_key).verify(
         signature, receipt_json
     )
     print(

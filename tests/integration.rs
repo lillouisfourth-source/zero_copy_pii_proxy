@@ -56,6 +56,7 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
         )
         .as_bytes()])),
         admin_bearer_token_hash: *blake3::hash(b"admin_key").as_bytes(),
+        attestation_document: Arc::new(Vec::new()),
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle: prometheus_handle.clone(),

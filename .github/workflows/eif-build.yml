@@ -120,7 +120,6 @@ jobs:
             --set image.tag=kind \
             --set config.upstreamApiUrl=http://pii-mock.default.svc.cluster.local:443 \
             --set-string secrets.authTokens=test_key \
-            --set-string secrets.mockProxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
             --set-string secrets.mockKmsCiphertext=dGVzdF9rZXk=
       - run: kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=zero-copy-pii-proxy --timeout=120s
       - name: Port-forward and smoke test

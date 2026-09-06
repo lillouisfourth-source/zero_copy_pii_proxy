@@ -91,6 +91,7 @@ pub struct AppState {
     pub engine_state: Arc<arc_swap::ArcSwap<EngineState>>,
     pub auth_keyring: Arc<arc_swap::ArcSwap<Vec<[u8; 32]>>>,
     pub admin_bearer_token_hash: [u8; 32],
+    pub attestation_document: Arc<Vec<u8>>,
     pub upstream_url: String,
     pub allowed_origins: Vec<String>,
     pub prometheus_handle: Arc<PrometheusHandle>,
@@ -209,6 +210,7 @@ pub fn make_router(state: AppState) -> Router {
         ));
 
     Router::new()
+        .route("/_attestation", get(attestation_document))
         .route(
             "/v1/chat/completions",
             post(proxy_handler).layer(middleware::from_fn_with_state(state.clone(), require_auth)),
@@ -234,6 +236,13 @@ pub fn make_router(state: AppState) -> Router {
         )
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+}
+
+async fn attestation_document(State(state): State<AppState>) -> (StatusCode, String) {
+    (
+        StatusCode::OK,
+        B64Std.encode(state.attestation_document.as_ref()),
+    )
 }
 
 #[derive(Debug, Deserialize)]

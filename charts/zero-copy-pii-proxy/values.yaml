@@ -64,5 +64,4 @@ networkPolicy:
 secrets:
   authTokens: "replace-me"
   adminBearerToken: "replace-me-admin"
-  mockProxyPrivateKey: ""
   mockKmsCiphertext: ""

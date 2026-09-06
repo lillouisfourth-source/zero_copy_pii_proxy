@@ -59,13 +59,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
                   key: ADMIN_BEARER_TOKEN
-            {{- if .Values.secrets.mockProxyPrivateKey }}
-            - name: PROXY_PRIVATE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
-                  key: MOCK_PROXY_PRIVATE_KEY
-            {{- end }}
           volumeMounts:
             {{- if .Values.config.piiConfigMap }}
             - name: pii-config

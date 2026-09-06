@@ -63,6 +63,7 @@ async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
         )
         .as_bytes()])),
         admin_bearer_token_hash: *blake3::hash(b"admin_key").as_bytes(),
+        attestation_document: Arc::new(Vec::new()),
         upstream_url: format!("http://{}", upstream_addr),
         allowed_origins: Vec::new(),
         prometheus_handle,

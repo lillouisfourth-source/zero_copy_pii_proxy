@@ -3,6 +3,58 @@ use secrecy::SecretString;
 use std::sync::Arc;
 use tracing::{debug, info};
 
+pub async fn attestation_document(public_key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    #[cfg(feature = "nitro")]
+    {
+        let nsm_fd = std::fs::File::open("/dev/nsm")
+            .map_err(|error| format!("Failed to open /dev/nsm: {error}"))?;
+        use std::os::fd::AsRawFd;
+        let public_key = public_key.to_vec();
+        let response = tokio::task::spawn_blocking(move || {
+            aws_nitro_enclaves_nsm_api::driver::nsm_process_request(
+                nsm_fd.as_raw_fd(),
+                aws_nitro_enclaves_nsm_api::api::Request::Attestation {
+                    nonce: None,
+                    public_key: None,
+                    user_data: Some(public_key.into()),
+                },
+            )
+        })
+        .await
+        .map_err(|error| format!("NSM request task failed: {error}"))?;
+        return match response {
+            aws_nitro_enclaves_nsm_api::api::Response::Attestation { document } => Ok(document),
+            other => Err(format!("NSM attestation request failed: {other:?}")),
+        };
+    }
+
+    #[cfg(not(feature = "nitro"))]
+    {
+        use serde::Serialize;
+        #[derive(Serialize)]
+        struct MockAttestation<'a> {
+            format: &'static str,
+            user_data: &'a [u8],
+            public_key: &'a [u8],
+            pcr0: String,
+            certificate: Vec<u8>,
+            cabundle: Vec<Vec<u8>>,
+        }
+        let document = MockAttestation {
+            format: "local-mock-not-nitro",
+            user_data: public_key,
+            public_key,
+            pcr0: std::env::var("MOCK_PCR0").unwrap_or_else(|_| "00".repeat(48)),
+            certificate: Vec::new(),
+            cabundle: Vec::new(),
+        };
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&document, &mut encoded)
+            .map_err(|error| format!("failed to encode mock attestation: {error}"))?;
+        Ok(encoded)
+    }
+}
+
 #[async_trait]
 pub trait KmsProvider: Send + Sync {
     async fn decrypt(&self, ciphertext: Vec<u8>) -> Result<SecretString, String>;

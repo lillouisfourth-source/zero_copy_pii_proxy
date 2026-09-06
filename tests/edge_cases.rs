@@ -40,6 +40,7 @@ async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::Join
         )
         .as_bytes()])),
         admin_bearer_token_hash: *blake3::hash(b"admin_key").as_bytes(),
+        attestation_document: Arc::new(Vec::new()),
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle: metrics_handle(),
