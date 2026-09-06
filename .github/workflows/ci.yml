@@ -1,16 +1,16 @@
 ﻿name: CI
 
 on:
-  workflow_dispatch:
   push:
     branches: [ "master", "main", "hardening/*" ]
-  pull_request:
+          MOCK_POD_IP=$(kubectl get pod -l app=pii-mock -o jsonpath='{.items[0].status.podIP}')
     branches: [ "master", "main", "hardening/*" ]
 
 env:
-  CARGO_TERM_COLOR: always
+            --set config.upstreamApiUrl=http://${MOCK_POD_IP}:8081 \
 
 jobs:
+            --set networkPolicy.mockEgressCidr=${MOCK_POD_IP}/32 \
   test-and-lint:
     name: Rust Tests & Clippy
     runs-on: ubuntu-latest
@@ -174,14 +174,14 @@ jobs:
           kubectl rollout status deployment/pii-mock --timeout=90s
       - name: Deploy chart in hostile kind environment
         run: |
-          MOCK_CLUSTER_IP=$(kubectl get service pii-mock -o jsonpath='{.spec.clusterIP}')
+          MOCK_POD_IP=$(kubectl get pod -l app=pii-mock -o jsonpath='{.items[0].status.podIP}')
           helm upgrade --install zero-copy-pii-proxy ./charts/zero-copy-pii-proxy \
             --set image.repository=zero-copy-pii-proxy \
             --set image.tag=test \
-            --set config.upstreamApiUrl=http://pii-mock:8081 \
+            --set config.upstreamApiUrl=http://${MOCK_POD_IP}:8081 \
             --set networkPolicy.upstreamApiPort=443 \
             --set networkPolicy.mockEgressEnabled=true \
-            --set networkPolicy.mockEgressCidr=${MOCK_CLUSTER_IP}/32 \
+            --set networkPolicy.mockEgressCidr=${MOCK_POD_IP}/32 \
             --set networkPolicy.mockEgressPort=8081 \
             --set-string secrets.authTokens=test_key \
             --set-string secrets.mockProxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
