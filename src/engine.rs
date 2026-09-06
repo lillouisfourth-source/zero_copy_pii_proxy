@@ -36,6 +36,12 @@ impl EngineState {
             replacement_strings,
         }
     }
+
+    pub fn policy_digest(&self) -> String {
+        let canonical = serde_json::to_vec(&(&self.patterns, &self.replacement_strings))
+            .expect("engine state should serialize");
+        blake3::hash(&canonical).to_hex().to_string()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

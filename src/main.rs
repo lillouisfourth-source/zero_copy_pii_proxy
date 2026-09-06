@@ -27,7 +27,7 @@ use zero_copy_pii_proxy::attestation::decrypt_upstream_api_key;
 use zero_copy_pii_proxy::attestation::LocalMockProvider;
 #[cfg(feature = "nitro")]
 use zero_copy_pii_proxy::attestation::NitroKmsProvider;
-use zero_copy_pii_proxy::engine::PiiVault;
+use zero_copy_pii_proxy::engine::{EngineState, PiiVault};
 use zero_copy_pii_proxy::{active_sse_streams, make_metrics_router, make_router, AppState};
 
 #[deny(warnings)]
@@ -83,6 +83,9 @@ async fn main() {
         &patterns_refs,
         &replacements_refs,
     ))));
+    let engine_state = Arc::new(ArcSwap::from_pointee(
+        vault.load_full().engine_state.as_ref().clone(),
+    ));
 
     let proxy_private_key = std::env::var("PROXY_PRIVATE_KEY")
         .ok()
@@ -104,9 +107,10 @@ async fn main() {
     let shutdown = shutdown_signal();
     if let Some(config_path) = std::env::var("PII_CONFIG_PATH").ok().map(PathBuf::from) {
         let watch_vault = vault.clone();
+        let watch_engine_state = engine_state.clone();
         let watch_path = config_path.clone();
         tokio::task::spawn_blocking(move || {
-            watch_pii_config(&watch_path, watch_vault);
+            watch_pii_config(&watch_path, watch_vault, watch_engine_state);
         });
     }
     let watch_keyring = auth_keyring.clone();
@@ -117,11 +121,10 @@ async fn main() {
     });
 
     let metrics_app = make_metrics_router(prometheus_handle.clone());
-    let initial_engine_state = vault.load_full().engine_state.as_ref().clone();
     let app = make_router(AppState {
         client,
         vault,
-        engine_state: Arc::new(ArcSwap::from_pointee(initial_engine_state)),
+        engine_state,
         auth_keyring,
         upstream_url,
         allowed_origins,
@@ -410,8 +413,10 @@ fn watch_auth_file(
                     let next_keyring = Arc::new(hash_keyring(&contents));
                     contents.zeroize();
                     if next_keyring.is_empty() {
-                        tracing::error!("Refusing to load empty auth file");
-                        return;
+                        tracing::error!(
+                            "Refusing to load empty auth file; retaining previous keyring"
+                        );
+                        break;
                     }
                     tenant_budgets.clear();
                     keyring.store(next_keyring);
@@ -473,7 +478,11 @@ fn parse_private_key(value: String) -> Option<SigningKey> {
     Some(SigningKey::from_bytes(&bytes))
 }
 
-fn watch_pii_config(config_path: &Path, vault: Arc<ArcSwap<PiiVault>>) {
+fn watch_pii_config(
+    config_path: &Path,
+    vault: Arc<ArcSwap<PiiVault>>,
+    engine_state: Arc<ArcSwap<EngineState>>,
+) {
     let watch_dir = config_path
         .parent()
         .map(Path::to_path_buf)
@@ -518,9 +527,11 @@ fn watch_pii_config(config_path: &Path, vault: Arc<ArcSwap<PiiVault>>) {
         let patterns_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
         let replacements_refs: Vec<&str> = replacements.iter().map(String::as_str).collect();
         let next_vault = Arc::new(PiiVault::new(&patterns_refs, &replacements_refs));
+        let next_engine_state = Arc::new(EngineState::new(&patterns, &replacements));
         contents.zeroize();
+        engine_state.store(next_engine_state);
         vault.store(next_vault);
-        tracing::info!(path = %config_path.display(), "swapped PII vault after config update");
+        tracing::info!(path = %config_path.display(), "swapped active PII engine after config update");
     }
 }
 

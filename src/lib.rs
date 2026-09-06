@@ -19,11 +19,13 @@ use base64::Engine;
 use bytes::Bytes;
 use dashmap::DashMap;
 use ed25519_dalek::{Signer, SigningKey};
+use serde::Serialize;
 use std::error::Error;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, BodyDataStream};
 use axum::extract::{DefaultBodyLimit, State};
@@ -442,17 +444,22 @@ async fn cors_middleware(
 pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Response<Body> {
     metrics::increment_counter!("proxy_requests_total");
     let request_span = Span::current();
-    let request_id = req
+    let request_id_header = req
         .extensions()
         .get::<RequestId>()
         .map(|id| id.header_value().clone())
         .or_else(|| req.headers().get("x-request-id").cloned());
+    let request_id = request_id_header
+        .as_ref()
+        .and_then(|value| value.to_str().ok().map(str::to_owned))
+        .unwrap_or_else(|| "missing".to_string());
 
     let tenant_id = req
         .extensions()
         .get::<[u8; 32]>()
         .copied()
         .unwrap_or([0u8; 32]);
+    let tenant_id_hex = hex::encode(tenant_id);
     let request_content_type = req.headers().get("content-type").cloned();
     let body_stream: BodyDataStream = req.into_body().into_data_stream();
     let request_body = reqwest::Body::wrap_stream(body_stream);
@@ -489,7 +496,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     if let Some(content_type) = request_content_type {
         upstream_request = upstream_request.header("content-type", content_type);
     }
-    if let Some(request_id) = request_id {
+    if let Some(request_id) = request_id_header {
         upstream_request = upstream_request.header("x-request-id", request_id);
     }
 
@@ -581,8 +588,11 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         OUTPUT_BYTE_BUDGET,
     );
     let private_key = state.proxy_private_key.clone();
+    let receipt_request_id = request_id.clone();
+    let receipt_tenant_id = tenant_id_hex;
     let mut stream_shutdown = state.shutdown.clone();
     let active_engine_state = state.engine_state.load_full();
+    let receipt_policy_digest = active_engine_state.policy_digest();
     tokio::spawn(async move {
         struct ActiveStreamGuard {
             active_sse: bool,
@@ -600,7 +610,11 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let mut stream = upstream_response.bytes_stream();
         let mut redactor = StreamRedactor::from_state(active_engine_state);
         let mut hasher = blake3::Hasher::new();
-        let mut done_detector = DoneDetector::default();
+        let mut done_detector = DoneDetector::new(
+            receipt_request_id,
+            receipt_tenant_id,
+            receipt_policy_digest,
+        );
         let mut downstream_closed = false;
         let reached_eof = loop {
             let item = match tokio::select! {
@@ -771,12 +785,22 @@ fn contains_body_limit_error(error: &(dyn Error + 'static)) -> bool {
     error.source().is_some_and(contains_body_limit_error)
 }
 
-fn build_proxy_audit_frame(receipt: &str, signature: &str) -> Bytes {
+fn build_proxy_audit_frame(receipt_json: &[u8], signature: &str) -> Bytes {
+    let receipt_json = String::from_utf8_lossy(receipt_json);
     let body = format!(
-        "\nevent: proxy_audit\ndata: {{\"receipt\": \"{}\", \"signature\": \"{}\"}}\n\n",
-        receipt, signature
+        "\nevent: proxy_audit\ndata: {{\"receipt\": {}, \"signature\": \"{}\"}}\n\n",
+        receipt_json, signature
     );
     Bytes::copy_from_slice(body.as_bytes())
+}
+
+#[derive(Debug, Serialize)]
+struct AttestedReceipt {
+    request_id: String,
+    tenant_id: String,
+    payload_hash: String,
+    policy_digest: String,
+    timestamp: u64,
 }
 
 async fn enqueue_with_timeout(
@@ -829,9 +853,22 @@ async fn forward_stream_events(
 pub struct DoneDetector {
     trailing: BytesMut,
     completed: bool,
+    request_id: String,
+    tenant_id: String,
+    policy_digest: String,
 }
 
 impl DoneDetector {
+    pub fn new(request_id: String, tenant_id: String, policy_digest: String) -> Self {
+        Self {
+            trailing: BytesMut::new(),
+            completed: false,
+            request_id,
+            tenant_id,
+            policy_digest,
+        }
+    }
+
     pub fn inspect(
         &mut self,
         bytes: Bytes,
@@ -939,9 +976,19 @@ impl DoneDetector {
         private_key: &SigningKey,
         hasher: &mut blake3::Hasher,
     ) -> Vec<StreamEvent> {
-        let digest = hasher.finalize().to_hex().to_string();
-        let signature = private_key.sign(digest.as_bytes());
-        let audit = build_proxy_audit_frame(&digest, &B64Std.encode(signature.to_bytes()));
+        let receipt = AttestedReceipt {
+            request_id: self.request_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            payload_hash: hasher.finalize().to_hex().to_string(),
+            policy_digest: self.policy_digest.clone(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        let receipt_json = serde_json::to_vec(&receipt).expect("receipt should serialize");
+        let signature = private_key.sign(&receipt_json);
+        let audit = build_proxy_audit_frame(&receipt_json, &B64Std.encode(signature.to_bytes()));
         self.completed = true;
         vec![
             StreamEvent::AuditReceipt(audit),
@@ -990,7 +1037,7 @@ fn proxy_audit_frame_is_emitted_before_done_event_and_signature_checks() {
     let receipt_hash = "9f3d74c42bb0c3d4d908a3d77dcb75a6c4df9c1d89b24fd9ba3c4405d5a2dc81";
     let signature = key.sign(receipt_hash.as_bytes());
     let signature_b64 = StdBase64.encode(signature.to_bytes());
-    let frame = build_proxy_audit_frame(receipt_hash, &signature_b64);
+    let frame = build_proxy_audit_frame(receipt_hash.as_bytes(), &signature_b64);
     let done = Bytes::from_static(b"data: [DONE]\n\n");
     let combined = [frame.as_ref(), done.as_ref()].concat();
 

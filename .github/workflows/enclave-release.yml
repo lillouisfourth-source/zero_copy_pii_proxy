@@ -17,40 +17,61 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Build Phase 1 Docker image
-        run: docker build -t pii-proxy:latest .
+      - name: Build deterministic Nitro image run 1
+        run: docker build --no-cache --provenance=false --build-arg SOURCE_DATE_EPOCH=1704067200 --build-arg CARGO_FEATURES="--features nitro" -t pii-proxy-enclave:run1 -f Dockerfile.enclave .
 
-      - name: Build EIF in Amazon Linux 2023
+      - name: Build EIF run 1
         run: |
-          docker run --rm \
+          docker run --rm --privileged --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            amazonlinux:2023 \
-            bash -c '
-              dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq docker-cli
-              nitro-cli build-enclave --docker-uri pii-proxy:latest --output-file proxy.eif
-              nitro-cli describe-eif --eif-path proxy.eif > eif_info.json
+            -v "$GITHUB_WORKSPACE":/workspace -w /workspace amazonlinux:2023 bash -lc '
+              set -euxo pipefail
+              dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq
+              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run1 --output-file enclave_run1.eif > build_run1.json
+              jq -r .Measurements.PCR0 build_run1.json > pcr0_run1.txt
             '
 
-      - name: Extract PCR0
+      - name: Build deterministic Nitro image run 2
+        run: docker build --no-cache --provenance=false --build-arg SOURCE_DATE_EPOCH=1704067200 --build-arg CARGO_FEATURES="--features nitro" -t pii-proxy-enclave:run2 -f Dockerfile.enclave .
+
+      - name: Build EIF run 2
+        run: |
+          docker run --rm --privileged --network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$GITHUB_WORKSPACE":/workspace -w /workspace amazonlinux:2023 bash -lc '
+              set -euxo pipefail
+              dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq
+              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run2 --output-file enclave_run2.eif > build_run2.json
+              jq -r .Measurements.PCR0 build_run2.json > pcr0_run2.txt
+            '
+
+      - name: Verify PCR0 determinism
         id: pcr0
         run: |
-          PCR0="$(jq -er '.Measurements.PCR0 // .Measurements[0].PCR0 // .pcr0 // .PCR0' eif_info.json)"
-          echo "pcr0=$PCR0" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          PCR0_RUN1="$(cat pcr0_run1.txt)"
+          PCR0_RUN2="$(cat pcr0_run2.txt)"
+          test "$PCR0_RUN1" = "$PCR0_RUN2"
+          printf '%s' "$PCR0_RUN1" > verified_pcr0.txt
+          echo "pcr0=$PCR0_RUN1" >> "$GITHUB_OUTPUT"
           {
             echo "## Nitro Enclave Measurement"
             echo
-            echo "PCR0 (Image Hash): \\`$PCR0\\`"
+            echo "PCR0 (Image Hash): \`$PCR0_RUN1\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload EIF measurements
+      - name: Upload deterministic EIF artifacts
         uses: actions/upload-artifact@v4
         with:
           name: enclave-measurements
           path: |
-            proxy.eif
-            eif_info.json
+            enclave_run1.eif
+            enclave_run2.eif
+            pcr0_run1.txt
+            pcr0_run2.txt
+            verified_pcr0.txt
+            build_run1.json
+            build_run2.json
 
   apply-production-kms-policy:
     needs: build-eif
