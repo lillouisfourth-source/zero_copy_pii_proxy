@@ -174,7 +174,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - name: Build Nitro image run 1
-        run: docker build --no-cache --build-arg CARGO_FEATURES="--features nitro" -f Dockerfile.enclave -t pii-proxy-enclave:run1 .
+        run: docker build --no-cache --build-arg SOURCE_DATE_EPOCH=1704067200 --build-arg CARGO_FEATURES="--features nitro" -f Dockerfile.enclave -t pii-proxy-enclave:run1 .
       - name: Build EIF run 1
         run: |
           docker run --rm --privileged --network host \
@@ -186,7 +186,17 @@ jobs:
               jq -r .Measurements.PCR0 build_run1.json > pcr0_run1.txt
             '
       - name: Build Nitro image run 2
-        run: docker build --no-cache --build-arg CARGO_FEATURES="--features nitro" -f Dockerfile.enclave -t pii-proxy-enclave:run2 .
+        run: docker build --no-cache --build-arg SOURCE_DATE_EPOCH=1704067200 --build-arg CARGO_FEATURES="--features nitro" -f Dockerfile.enclave -t pii-proxy-enclave:run2 .
+      - name: Compare inner binary hashes
+        run: |
+          set -euo pipefail
+          docker create --name extract_run1 pii-proxy-enclave:run1
+          docker cp extract_run1:/zero_copy_pii_proxy ./binary_run1
+          docker rm extract_run1
+          docker create --name extract_run2 pii-proxy-enclave:run2
+          docker cp extract_run2:/zero_copy_pii_proxy ./binary_run2
+          docker rm extract_run2
+          sha256sum binary_run1 binary_run2
       - name: Build EIF run 2
         run: |
           docker run --rm --privileged --network host \
