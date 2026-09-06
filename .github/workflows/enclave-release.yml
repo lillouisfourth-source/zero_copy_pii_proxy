@@ -28,7 +28,7 @@ jobs:
             -w /workspace \
             amazonlinux:2023 \
             bash -c '
-              dnf install -y aws-nitro-enclaves-cli jq docker-cli
+              dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq docker-cli
               nitro-cli build-enclave --docker-uri pii-proxy:latest --output-file proxy.eif
               nitro-cli describe-eif --eif-path proxy.eif > eif_info.json
             '

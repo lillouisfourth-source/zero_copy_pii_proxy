@@ -181,7 +181,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$GITHUB_WORKSPACE":/workspace -w /workspace amazonlinux:2023 bash -lc '
               set -euxo pipefail
-              dnf install -y aws-nitro-enclaves-cli jq
+              dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq
               nitro-cli build-enclave --docker-uri pii-proxy-enclave:run1 --output-file enclave_run1.eif > build_run1.json
               jq -r .Measurements.PCR0 build_run1.json > pcr0_run1.txt
             '
@@ -193,7 +193,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$GITHUB_WORKSPACE":/workspace -w /workspace amazonlinux:2023 bash -lc '
               set -euxo pipefail
-              dnf install -y aws-nitro-enclaves-cli jq
+              dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq
               nitro-cli build-enclave --docker-uri pii-proxy-enclave:run2 --output-file enclave_run2.eif > build_run2.json
               jq -r .Measurements.PCR0 build_run2.json > pcr0_run2.txt
             '
