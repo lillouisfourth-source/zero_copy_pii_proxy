@@ -169,7 +169,7 @@ jobs:
     name: Cryptographic PCR0 Determinism
     runs-on: ubuntu-latest
     outputs:
-      verified_pcr0: ${{ steps.verify.outputs.verified_pcr0 }}
+      verified_pcr0: ${{ steps.compare_hashes.outputs.verified_pcr0 }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -197,19 +197,30 @@ jobs:
               nitro-cli build-enclave --docker-uri pii-proxy-enclave:run2 --output-file enclave_run2.eif > build_run2.json
               jq -r .Measurements.PCR0 build_run2.json > pcr0_run2.txt
             '
-      - name: Verify PCR0 determinism
-        id: verify
+      - name: Compare PCR0 hashes
+        id: compare_hashes
         run: |
           set -euo pipefail
           PCR0_RUN1="$(cat pcr0_run1.txt)"
           PCR0_RUN2="$(cat pcr0_run2.txt)"
-          test "$PCR0_RUN1" = "$PCR0_RUN2"
+          echo "=== PCR0 DIAGNOSTICS ==="
+          echo "Run 1 PCR0: $PCR0_RUN1"
+          echo "Run 2 PCR0: $PCR0_RUN2"
+          echo "========================"
+          if [ "$PCR0_RUN1" != "$PCR0_RUN2" ]; then
+            echo "error: PCR0 determinism failed."
+            exit 1
+          fi
+          echo "PCR0 determinism verified."
           printf '%s' "$PCR0_RUN1" > verified_pcr0.txt
           jq -n --arg pcr0 "$PCR0_RUN1" '{verified_pcr0: $pcr0}' > pcr_measurements.json
           echo "verified_pcr0=$PCR0_RUN1" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: pcr-measurements
+          name: enclave-build-artifacts
           path: |
+            *.eif
+            pcr0_*.txt
             verified_pcr0.txt
             pcr_measurements.json

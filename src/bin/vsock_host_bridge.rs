@@ -28,50 +28,7 @@ use std::sync::Arc;
 use tokio::io;
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::net::TcpStream as TokioTcpStream;
-
-// Placeholder for VSOCK support. On Linux, use:
-//   vsock = "0.3"  (from Crates.io)
-// This would allow TcpStream equivalent for VSOCK sockets.
-// For now, we define a compatibility module.
-
-#[cfg(target_os = "linux")]
-mod vsock {
-    use std::io::Result;
-    use std::os::unix::io::{AsRawFd, RawFd};
-
-    pub struct VsockStream {
-        // Would wrap a unix socket bound to /dev/vsock
-        fd: RawFd,
-    }
-
-    impl VsockStream {
-        pub async fn connect(cid: u32, port: u32) -> Result<Self> {
-            // On Linux: open /dev/vsock, connect to AF_VSOCK address
-            // This is a stub; full implementation requires AF_VSOCK socket setup
-            todo!(
-                "Implement AF_VSOCK connection for CID={}, PORT={}",
-                cid,
-                port
-            )
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-mod vsock {
-    use std::io::Result;
-
-    pub struct VsockStream;
-
-    impl VsockStream {
-        pub async fn connect(_cid: u32, _port: u32) -> Result<Self> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "VSOCK is only supported on Linux with Nitro Enclave",
-            ))
-        }
-    }
-}
+use tokio_vsock::VsockStream;
 
 /// Configuration for the VSOCK bridge
 #[derive(Clone, Debug)]
@@ -102,87 +59,22 @@ async fn bridge_connection(
     // Connect to Nitro Enclave VSOCK
     // NOTE: On Windows/macOS, this will fail (VSOCK is Linux-only).
     // For production use, run on Amazon Linux 2 with Nitro support.
-    let mut enclave_stream = connect_to_enclave(&config).await?;
+    let mut enclave_stream = VsockStream::connect(config.enclave_cid, config.enclave_port)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to connect to enclave VSOCK CID {} port {}: {error}",
+                config.enclave_cid, config.enclave_port
+            )
+        })?;
 
     // Stream data bidirectionally between client and enclave
-    // Uses tokio::io::copy_bidirectional to multiplex both directions
-    let (mut client_read, mut client_write) = client_stream.into_split();
-    let (mut enclave_read, mut enclave_write) = enclave_stream.into_split();
-
-    // Spawn two tasks: client→enclave and enclave→client
-    // This allows full-duplex communication without blocking
-    let client_to_enclave = tokio::spawn(async move {
-        match io::copy(&mut client_read, &mut enclave_write).await {
-            Ok(n) => {
-                tracing::debug!(bytes_copied = n, "client→enclave copy completed");
-                Ok::<(), String>(())
-            }
-            Err(e) => {
-                tracing::warn!(?e, "client→enclave copy failed");
-                Err(format!("client→enclave copy error: {}", e))
-            }
-        }
-    });
-
-    let enclave_to_client = tokio::spawn(async move {
-        match io::copy(&mut enclave_read, &mut client_write).await {
-            Ok(n) => {
-                tracing::debug!(bytes_copied = n, "enclave→client copy completed");
-                Ok::<(), String>(())
-            }
-            Err(e) => {
-                tracing::warn!(?e, "enclave→client copy failed");
-                Err(format!("enclave→client copy error: {}", e))
-            }
-        }
-    });
-
-    // Wait for both directions to complete
-    // If one direction fails, the other will also terminate (connection broken)
-    tokio::select! {
-        result1 = client_to_enclave => {
-            tracing::info!("client→enclave direction closed");
-            let _ = result1;
-        }
-        result2 = enclave_to_client => {
-            tracing::info!("enclave→client direction closed");
-            let _ = result2;
-        }
+    if let Err(error) = io::copy_bidirectional(&mut client_stream, &mut enclave_stream).await {
+        tracing::error!(%error, ?peer_addr, "relay connection severed");
+        return Err(format!("bidirectional relay failed: {error}"));
     }
 
     Ok(())
-}
-
-/// Connect to Nitro Enclave via VSOCK
-///
-/// On Linux with Nitro support:
-///   Returns a TokioTcpStream equivalent connected to VSOCK://<CID>:<PORT>
-///
-/// On non-Linux platforms:
-///   Returns an error (VSOCK is Linux-only)
-#[cfg(target_os = "linux")]
-async fn connect_to_enclave(config: &BridgeConfig) -> Result<TokioTcpStream, String> {
-    // On Linux with AWS Nitro:
-    // AF_VSOCK requires special setup. This is a stub implementation.
-    // Real implementation would:
-    //   1. Create AF_VSOCK socket: socket(AF_VSOCK, SOCK_STREAM, 0)
-    //   2. Connect to struct sockaddr_vm with cid and port
-    //   3. Wrap in TokioTcpStream or equivalent async I/O
-    //
-    // For now, return error indicating that full AF_VSOCK setup is needed
-
-    Err(format!(
-        "AF_VSOCK connection to CID {} port {} not yet fully implemented. \
-         This requires Linux with Nitro Enclave support and proper socket setup. \
-         See AWS Nitro CLI documentation for prerequisites.",
-        config.enclave_cid, config.enclave_port
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn connect_to_enclave(_config: &BridgeConfig) -> Result<TokioTcpStream, String> {
-    Err("VSOCK is only supported on Linux. This binary must run on an EC2 instance with Nitro Enclave support."
-        .to_string())
 }
 
 #[tokio::main]

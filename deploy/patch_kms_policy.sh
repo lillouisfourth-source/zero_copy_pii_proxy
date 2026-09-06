@@ -3,9 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 MEASUREMENTS="${1:-${SCRIPT_DIR}/../pcr_measurements.json}"
-TEMPLATE="${SCRIPT_DIR}/kms_policy_template.json"
-OUTPUT="${SCRIPT_DIR}/kms_policy.json"
+TEMPLATE="${SCRIPT_DIR}/kms_trust_policy.json.tpl"
+OUTPUT="${SCRIPT_DIR}/kms_trust_policy.json"
 
-PCR0="$(jq -er '.PCR0' "${MEASUREMENTS}")"
-sed "s/PCR0_HASH_PLACEHOLDER/${PCR0}/g" "${TEMPLATE}" > "${OUTPUT}"
+PCR0="$(jq -er '.PCR0 // .verified_pcr0' "${MEASUREMENTS}")"
+sed "s/\${pcr0_hash}/${PCR0}/g" "${TEMPLATE}" > "${OUTPUT}"
 printf 'Wrote %s using PCR0 %s\n' "${OUTPUT}" "${PCR0}"

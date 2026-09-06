@@ -65,8 +65,8 @@ jobs:
           PCR0: ${{ needs.build-eif.outputs.pcr0 }}
         run: |
           test -n "$PCR0"
-          sed "s/PLACEHOLDER_PCR0_SHA384_HASH/$PCR0/g" \
-            terraform/kms_policy.json > terraform/kms_policy.approved.json
+          sed "s/\${pcr0_hash}/$PCR0/g" \
+            deploy/kms_trust_policy.json.tpl > terraform/kms_policy.approved.json
           terraform -chdir=terraform/eks_enclaves init -input=false
           terraform -chdir=terraform/eks_enclaves apply -auto-approve \
             -var="pcr0_hash=$PCR0"
