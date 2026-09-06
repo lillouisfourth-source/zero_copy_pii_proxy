@@ -62,7 +62,5 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.mockEgressPort | default 8081 }}
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.mockEgressTargetPort | default 8081 }}
     {{- end }}
 {{- end }}

@@ -181,7 +181,6 @@ jobs:
             --set networkPolicy.upstreamApiPort=443 \
             --set networkPolicy.mockEgressEnabled=true \
             --set networkPolicy.mockEgressPort=8081 \
-            --set networkPolicy.mockEgressTargetPort=8081 \
             --set-string secrets.authTokens=test_key \
             --set-string secrets.mockProxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
             --set-string secrets.mockKmsCiphertext=dGVzdF9rZXk= \
@@ -205,7 +204,6 @@ jobs:
           exit 1
       - name: Verify Single Request Path
         run: |
-          kubectl delete networkpolicy --all || true
           curl --fail-with-body -sS -i -X POST \
             -H "Authorization: Bearer test_key" \
             -H "Content-Type: application/json" \
