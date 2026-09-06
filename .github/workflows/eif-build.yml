@@ -118,7 +118,7 @@ jobs:
           helm upgrade --install zero-copy-pii-proxy ./charts/zero-copy-pii-proxy \
             --set image.repository=zero-copy-pii-proxy \
             --set image.tag=kind \
-            --set config.upstreamApiUrl=http://pii-mock:443 \
+            --set config.upstreamApiUrl=http://pii-mock.default.svc.cluster.local:443 \
             --set-string secrets.authTokens=test_key \
             --set-string secrets.mockProxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
             --set-string secrets.mockKmsCiphertext=dGVzdF9rZXk=

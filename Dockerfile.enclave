@@ -17,6 +17,6 @@ RUN RUSTFLAGS="${RUSTFLAGS} -C debuginfo=0 -C strip=symbols" cargo build --relea
 
 FROM scratch
 
-COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy /proxy
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy /zero_copy_pii_proxy
 
-ENTRYPOINT ["/proxy"]
+ENTRYPOINT ["/zero_copy_pii_proxy"]

@@ -100,20 +100,14 @@ spec:
       ports:
         - protocol: UDP
           port: 53
-    # Allow TLS connections to upstream LLM API (port 443)
+    # Allow HTTPS only to the approved AWS KMS VPC endpoint CIDR.
     - to:
-        - podSelector: {}  # Allows egress to any pod in the cluster (should be tightened to specific upstream)
+        - ipBlock:
+            cidr: 10.0.0.0/16
       ports:
         - protocol: TCP
           port: 443
-    # Allow HTTPS to external IPs (Kubernetes DNS, NTP, etc.)
-    - to:
-        - namespaceSelector: {}
-      ports:
-        - protocol: TCP
-          port: 443
-    # EXPLICIT DENY: No HTTP (80), no SSH (22), no databases (3306, 5432, etc.)
-    # This is a "default deny all" policy; only the above two rules are allowed.
+    # EXPLICIT DENY: no broad pod, namespace, HTTP, SSH, or database egress.
 
 ---
 # NetworkPolicy: Deny all ingress by default (except explicitly allowed above)
