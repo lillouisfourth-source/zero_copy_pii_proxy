@@ -11,7 +11,7 @@
       "Resource": "*",
       "Condition": {
         "StringEqualsIgnoreCase": {
-          "kms:RecipientAttestation:ImageSha384": "${pcr0_hash}"
+          "kms:RecipientAttestation:PCR0": "${pcr0_hash}"
         }
       }
     }

@@ -31,10 +31,11 @@ def decode_public_key(value: str) -> bytes:
     return raw
 
 
-def hash_transcript(path: Path) -> tuple[str, str, str]:
+def hash_transcript(path: Path) -> tuple[str, dict[str, object], bytes, str]:
     """Hash SSE bytes before DONE while extracting the injected audit event."""
     hasher = blake3.blake3()
     receipt = None
+    receipt_json = None
     signature = None
     expecting_audit_data = False
     expecting_audit_blank = False
@@ -51,8 +52,35 @@ def hash_transcript(path: Path) -> tuple[str, str, str]:
                     raise ValueError(f"invalid proxy_audit JSON: {exc}") from exc
                 receipt = data.get("receipt")
                 signature = data.get("signature")
-                if not isinstance(receipt, str) or not isinstance(signature, str):
+                if not isinstance(receipt, dict) or not isinstance(signature, str):
                     raise ValueError("proxy_audit payload missing receipt or signature")
+                for field in ("request_id", "tenant_id", "payload_hash", "policy_digest", "timestamp"):
+                    if field not in receipt:
+                        raise ValueError(f"receipt missing required field: {field}")
+                for field in ("request_id", "tenant_id", "payload_hash", "policy_digest"):
+                    if not isinstance(receipt[field], str) or not receipt[field]:
+                        raise ValueError(f"receipt field must be a non-empty string: {field}")
+                if not isinstance(receipt["timestamp"], int) or receipt["timestamp"] < 0:
+                    raise ValueError("receipt timestamp must be a non-negative integer")
+                for field in ("payload_hash", "policy_digest"):
+                    value = receipt[field]
+                    if len(value) != 64:
+                        raise ValueError(f"receipt field must be a 32-byte hexadecimal digest: {field}")
+                    try:
+                        bytes.fromhex(value)
+                    except ValueError as exc:
+                        raise ValueError(f"receipt field is not hexadecimal: {field}") from exc
+                receipt_key = b'"receipt"'
+                receipt_key_start = line[len(b"data:"):].find(receipt_key)
+                if receipt_key_start < 0:
+                    raise ValueError("audit event has no receipt field")
+                receipt_value_start = line.find(b":", len(b"data:") + receipt_key_start + len(receipt_key)) + 1
+                while receipt_value_start < len(line) and line[receipt_value_start:receipt_value_start + 1].isspace():
+                    receipt_value_start += 1
+                receipt_value_end = json.JSONDecoder().raw_decode(
+                    line.decode("utf-8"), receipt_value_start
+                )[1]
+                receipt_json = line[receipt_value_start:receipt_value_end].rstrip(b"\r\n")
                 expecting_audit_data = False
                 expecting_audit_blank = True
                 continue
@@ -85,19 +113,19 @@ def hash_transcript(path: Path) -> tuple[str, str, str]:
 
     if expecting_audit_data or expecting_audit_blank:
         raise ValueError("proxy_audit event is missing its data line")
-    if receipt is None or signature is None:
+    if receipt is None or receipt_json is None or signature is None:
         raise ValueError("no proxy_audit event found before [DONE]")
-    return hasher.hexdigest(), receipt, signature
+    return hasher.hexdigest(), receipt, receipt_json, signature
 
 
-def verify_signature(receipt: str, signature_b64: str, public_key: bytes) -> None:
+def verify_signature(receipt_json: bytes, signature_b64: str, public_key: bytes) -> None:
     try:
         signature = base64.b64decode(signature_b64, validate=True)
     except base64.binascii.Error as exc:
         raise ValueError(f"signature is not valid base64: {exc}") from exc
     try:
         Ed25519PublicKey.from_public_bytes(public_key).verify(
-            signature, receipt.encode("utf-8")
+            signature, receipt_json
         )
     except InvalidSignature as exc:
         raise ValueError("Ed25519 signature verification failed") from exc
@@ -111,15 +139,16 @@ def main() -> int:
 
     try:
         public_key = decode_public_key(args.public_key)
-        computed, receipt, signature = hash_transcript(args.transcript)
-        if computed != receipt:
-            raise ValueError(f"BLAKE3 mismatch: computed {computed}, transcript declares {receipt}")
-        verify_signature(receipt, signature, public_key)
+        computed, receipt, receipt_json, signature = hash_transcript(args.transcript)
+        declared_hash = receipt["payload_hash"]
+        if computed != declared_hash:
+            raise ValueError(f"BLAKE3 mismatch: computed {computed}, transcript declares {declared_hash}")
+        verify_signature(receipt_json, signature, public_key)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"verified receipt {receipt}")
+    print(f"verified receipt payload hash {receipt['payload_hash']}")
     return 0
 
 

@@ -36,7 +36,7 @@ spec:
         - namespaceSelector:
             matchLabels:
               name: ingress-nginx
-        - podSelector:
+          podSelector:
             matchLabels:
               app.kubernetes.io/name: ingress-nginx
       ports:
@@ -64,7 +64,7 @@ spec:
         - namespaceSelector:
             matchLabels:
               name: monitoring
-        - podSelector:
+          podSelector:
             matchLabels:
               app.kubernetes.io/name: prometheus
       ports:

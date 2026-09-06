@@ -48,7 +48,35 @@ variable "subnet_id" {
 variable "pcr0_hash" {
   type        = string
   description = "Approved Nitro Enclave PCR0 hash passed by CI."
-  default     = ""
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{96}$", var.pcr0_hash))
+    error_message = "pcr0_hash must be exactly 96 hexadecimal characters."
+  }
+}
+
+variable "kms_key_id" {
+  type        = string
+  description = "KMS key ID or ARN whose key policy authorizes the attested enclave."
+}
+
+variable "enclave_role_name" {
+  type        = string
+  description = "IAM role name allowed to request attested KMS decrypts."
+}
+
+data "aws_caller_identity" "current" {}
+
+locals {
+  kms_trust_policy = templatefile("${path.module}/../../deploy/kms_trust_policy.json.tpl", {
+    account_id        = data.aws_caller_identity.current.account_id
+    enclave_role_name = var.enclave_role_name
+    pcr0_hash         = var.pcr0_hash
+  })
+}
+
+resource "aws_kms_key_policy" "enclave_trust" {
+  key_id = var.kms_key_id
+  policy = local.kms_trust_policy
 }
 
 resource "aws_launch_template" "eks_enclave" {
