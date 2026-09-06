@@ -4,7 +4,6 @@ on:
   push:
     branches: [ "master", "main", "hardening/*" ]
 
-env:
 jobs:
   test-and-lint:
     name: Rust Tests & Clippy
