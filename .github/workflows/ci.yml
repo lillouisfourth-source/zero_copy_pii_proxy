@@ -188,7 +188,7 @@ jobs:
         shell: bash
         run: |
           PROXY_POD=$(kubectl get pod -l app.kubernetes.io/name=zero-copy-pii-proxy -o jsonpath='{.items[0].metadata.name}')
-          kubectl debug pod/${PROXY_POD} --image=busybox:1.36.1 --target=proxy -- sh -c \
+          kubectl debug pod/${PROXY_POD} --image=busybox:1.36.1 --target=proxy --attach -- sh -c \
             'nslookup pii-mock.default.svc.cluster.local && nc -vz pii-mock.default.svc.cluster.local 8081'
       - name: Port-forward Helm deployment
         shell: bash
