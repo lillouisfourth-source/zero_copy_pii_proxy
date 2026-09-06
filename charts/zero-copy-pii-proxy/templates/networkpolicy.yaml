@@ -55,14 +55,6 @@ spec:
         - protocol: TCP
           port: {{ .Values.networkPolicy.upstreamApiPort | default 443 }}
     {{- if .Values.networkPolicy.mockEgressEnabled }}
-    {{- if .Values.networkPolicy.mockEgressCidr }}
-    - to:
-        - ipBlock:
-            cidr: {{ .Values.networkPolicy.mockEgressCidr | quote }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.mockEgressPort | default 8081 }}
-    {{- end }}
     - to:
         - podSelector:
             matchLabels:

@@ -58,7 +58,6 @@ networkPolicy:
   upstreamApiCidr: "0.0.0.0/0"
   upstreamApiPort: 443
   mockEgressEnabled: false
-  mockEgressCidr: ""
   mockEgressPort: 8081
 
 secrets:
