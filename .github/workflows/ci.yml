@@ -174,12 +174,14 @@ jobs:
           kubectl rollout status deployment/pii-mock --timeout=90s
       - name: Deploy chart in hostile kind environment
         run: |
+          MOCK_CLUSTER_IP=$(kubectl get service pii-mock -o jsonpath='{.spec.clusterIP}')
           helm upgrade --install zero-copy-pii-proxy ./charts/zero-copy-pii-proxy \
             --set image.repository=zero-copy-pii-proxy \
             --set image.tag=test \
             --set config.upstreamApiUrl=http://pii-mock:8081 \
             --set networkPolicy.upstreamApiPort=443 \
             --set networkPolicy.mockEgressEnabled=true \
+            --set networkPolicy.mockEgressCidr=${MOCK_CLUSTER_IP}/32 \
             --set networkPolicy.mockEgressPort=8081 \
             --set-string secrets.authTokens=test_key \
             --set-string secrets.mockProxyPrivateKey=0000000000000000000000000000000000000000000000000000000000000000 \
