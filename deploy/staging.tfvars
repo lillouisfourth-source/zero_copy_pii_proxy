@@ -1,0 +1,10 @@
+region = "us-west-2"
+name = "pii-proxy-enclave-staging"
+ami_id = "ami-0123456789abcdef0"
+cluster_name = "zero-copy-pii-proxy-staging"
+instance_profile_name = "eks-node-group-staging-instance-profile"
+security_group_ids = ["sg-0123456789abcdef0"]
+subnet_id = "subnet-0123456789abcdef0"
+pcr0_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+kms_key_id = "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+enclave_role_name = "zero-copy-pii-proxy-staging-enclave"
