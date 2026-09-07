@@ -32,8 +32,8 @@ resources:
     cpu: 50m
     memory: 64Mi
   limits:
-    cpu: 200m
-    memory: 256Mi
+    cpu: 1000m
+    memory: 512Mi
 
 probes:
   liveness:
@@ -53,8 +53,15 @@ config:
 
 networkPolicy:
   enabled: true
-  egressCidrs: []
+  coreDnsCidr: "10.96.0.10/32"
+  kmsVpcEndpointCidr: "10.0.0.0/16"
+  # Fail closed until deployment supplies the approved upstream API CIDR.
+  upstreamApiCidr: "192.0.2.0/24"
+  upstreamApiPort: 443
+  mockEgressEnabled: false
+  mockEgressPort: 8081
 
 secrets:
   authTokens: "replace-me"
-  proxyPrivateKey: ""
+  adminBearerToken: "replace-me-admin"
+  mockKmsCiphertext: ""

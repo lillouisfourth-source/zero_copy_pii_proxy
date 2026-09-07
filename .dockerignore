@@ -4,3 +4,8 @@ target/
 .env
 *.log
 **/*.rs.bk
+*.eif
+!enclave.eif
+*.json
+pcr0_*.txt
+binary_run*

@@ -5,7 +5,6 @@ use axum::routing::post;
 use axum::Router;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use reqwest::Client;
-use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
 use zero_copy_pii_proxy::engine::PiiVault;
@@ -30,17 +29,26 @@ async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::Join
         &["password"],
         &["[REDACTED]"],
     )));
+    let initial_engine_state = vault.load_full().engine_state.as_ref().clone();
+    let app_metrics_handle = (*metrics_handle()).clone();
     let router = make_router(AppState {
         client: Client::builder().build().expect("client"),
         vault,
-        auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(HashSet::from([
-            *blake3::hash(b"test_key").as_bytes(),
-        ]))),
+        engine_state: Arc::new(arc_swap::ArcSwap::from_pointee(initial_engine_state)),
+        auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(vec![*blake3::hash(
+            b"test_key",
+        )
+        .as_bytes()])),
+        admin_bearer_token_hash: *blake3::hash(b"admin_key").as_bytes(),
+        attestation_document: Arc::new(Vec::new()),
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle: metrics_handle(),
+        metrics_handle: app_metrics_handle,
         proxy_private_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         shutdown: tokio::sync::watch::channel(false).1,
+        global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
+        tenant_budgets: Arc::new(dashmap::DashMap::new()),
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy bind");
     let address = listener.local_addr().expect("proxy address");

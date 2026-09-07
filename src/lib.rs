@@ -1,21 +1,31 @@
 #![deny(warnings)]
 
+pub mod attestation;
 pub mod budget_queue;
 pub mod domain;
 pub mod engine;
+#[cfg(feature = "nitro")]
+pub mod vsock_bridge;
+#[cfg(feature = "host-bridge")]
+pub mod vsock_host_bridge;
 
-use crate::budget_queue::{channel, enqueue, BudgetedBody, ByteBudget};
-use crate::engine::{OutputSegment, PiiVault, StreamRedactor};
+pub use crate::budget_queue::TenantBudget;
+use crate::budget_queue::{
+    channel, enqueue, BudgetError, BudgetedBody, ByteBudget, EnqueueError, GLOBAL_MEMORY_CHUNK,
+};
+use crate::engine::{EngineState, OutputSegment, PiiVault, StreamRedactor};
 use base64::engine::general_purpose::STANDARD as B64Std;
 use base64::Engine;
 use bytes::Bytes;
+use dashmap::DashMap;
 use ed25519_dalek::{Signer, SigningKey};
-use std::collections::HashSet;
+use serde::Serialize;
 use std::error::Error;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, BodyDataStream};
 use axum::extract::{DefaultBodyLimit, State};
@@ -30,7 +40,9 @@ use bytes::BytesMut;
 use futures::StreamExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use reqwest::Client;
+use serde::Deserialize;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use tower_http::request_id::{
     MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
@@ -76,12 +88,18 @@ impl Error for RequestBodyError {
 pub struct AppState {
     pub client: Client,
     pub vault: Arc<arc_swap::ArcSwap<PiiVault>>,
-    pub auth_keyring: Arc<arc_swap::ArcSwap<HashSet<[u8; 32]>>>,
+    pub engine_state: Arc<arc_swap::ArcSwap<EngineState>>,
+    pub auth_keyring: Arc<arc_swap::ArcSwap<Vec<[u8; 32]>>>,
+    pub admin_bearer_token_hash: [u8; 32],
+    pub attestation_document: Arc<Vec<u8>>,
     pub upstream_url: String,
     pub allowed_origins: Vec<String>,
     pub prometheus_handle: Arc<PrometheusHandle>,
+    pub metrics_handle: PrometheusHandle,
     pub proxy_private_key: SigningKey,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
+    pub global_memory: Arc<Semaphore>,
+    pub tenant_budgets: Arc<DashMap<[u8; 32], Arc<Semaphore>>>,
 }
 
 pub const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
@@ -183,12 +201,21 @@ fn decrement_active_sse_streams() {
 /// Build the axum Router used by main and tests. Exposed publicly for integration tests.
 pub fn make_router(state: AppState) -> Router {
     let request_id_header = axum::http::HeaderName::from_static("x-request-id");
+    let admin_routes = Router::new()
+        .route("/rules", post(update_rules))
+        .route("/metrics", get(admin_metrics))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
 
     Router::new()
+        .route("/_attestation", get(attestation_document))
         .route(
             "/v1/chat/completions",
             post(proxy_handler).layer(middleware::from_fn_with_state(state.clone(), require_auth)),
         )
+        .nest("/_admin", admin_routes)
         .with_state(state.clone())
         // Global body limit to mitigate OOM/memory attacks (2 MiB)
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
@@ -209,6 +236,48 @@ pub fn make_router(state: AppState) -> Router {
         )
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+}
+
+async fn attestation_document(State(state): State<AppState>) -> (StatusCode, String) {
+    (
+        StatusCode::OK,
+        B64Std.encode(state.attestation_document.as_ref()),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RulesUpdate {
+    pub patterns: Vec<String>,
+}
+
+async fn update_rules(
+    State(state): State<AppState>,
+    axum::Json(update): axum::Json<RulesUpdate>,
+) -> StatusCode {
+    if update.patterns.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    let patterns = update.patterns;
+    let compiled = tokio::task::spawn_blocking(move || {
+        EngineState::new(
+            &patterns,
+            &patterns
+                .iter()
+                .map(|_| "[REDACTED]".to_string())
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await;
+    let Ok(compiled) = compiled else {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    };
+    state.engine_state.store(Arc::new(compiled));
+    metrics::increment_counter!("rules_swaps_total");
+    StatusCode::OK
+}
+
+async fn admin_metrics(State(state): State<AppState>) -> String {
+    state.metrics_handle.render()
 }
 
 pub fn make_metrics_router(prometheus_handle: Arc<PrometheusHandle>) -> Router {
@@ -281,14 +350,54 @@ async fn require_auth(
         if let Ok(s) = hv.to_str() {
             if let Some(token) = s.strip_prefix("Bearer ") {
                 let token_hash = *blake3::hash(token.as_bytes()).as_bytes();
-                if state.auth_keyring.load().contains(&token_hash) {
-                    let resp = next.run(req).await;
+                let mut authenticated = subtle::Choice::from(0u8);
+                for valid_hash in state.auth_keyring.load().iter() {
+                    authenticated |= token_hash.ct_eq(valid_hash);
+                }
+                if authenticated.unwrap_u8() == 1 {
+                    let mut request = req;
+                    request.extensions_mut().insert(token_hash);
+                    let resp = next.run(request).await;
                     return Ok(resp);
                 }
             }
         }
     }
     metrics::increment_counter!("proxy_auth_failures_total");
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let Some(header) = req.headers().get(axum::http::header::AUTHORIZATION) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let Ok(value) = header.to_str() else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let token_hash = blake3::hash(token.as_bytes());
+    if token_hash
+        .as_bytes()
+        .ct_eq(&state.admin_bearer_token_hash)
+        .unwrap_u8()
+        == 1
+    {
+        return Ok(next.run(req).await);
+    }
+    if state
+        .auth_keyring
+        .load()
+        .iter()
+        .any(|valid_hash| token_hash.as_bytes().ct_eq(valid_hash).unwrap_u8() == 1)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
     Err(StatusCode::UNAUTHORIZED)
 }
 
@@ -353,15 +462,24 @@ async fn cors_middleware(
 }
 
 pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Response<Body> {
-    // Count requests independently from streams; a stream exists only after upstream success.
     metrics::increment_counter!("proxy_requests_total");
     let request_span = Span::current();
-    let request_id = req
+    let request_id_header = req
         .extensions()
         .get::<RequestId>()
         .map(|id| id.header_value().clone())
         .or_else(|| req.headers().get("x-request-id").cloned());
+    let request_id = request_id_header
+        .as_ref()
+        .and_then(|value| value.to_str().ok().map(str::to_owned))
+        .unwrap_or_else(|| "missing".to_string());
 
+    let tenant_id = req
+        .extensions()
+        .get::<[u8; 32]>()
+        .copied()
+        .unwrap_or([0u8; 32]);
+    let tenant_id_hex = hex::encode(tenant_id);
     let request_content_type = req.headers().get("content-type").cloned();
     let body_stream: BodyDataStream = req.into_body().into_data_stream();
     let request_body = reqwest::Body::wrap_stream(body_stream);
@@ -375,12 +493,30 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                 .unwrap();
         }
     };
+    let stream_memory_permit = match tokio::time::timeout(
+        Duration::from_secs(2),
+        state
+            .global_memory
+            .clone()
+            .acquire_many_owned(GLOBAL_MEMORY_CHUNK as u32),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            metrics::increment_counter!("proxy_memory_load_shed_total");
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("proxy memory capacity exhausted"))
+                .unwrap();
+        }
+    };
 
     let mut upstream_request = state.client.post(&state.upstream_url).body(request_body);
     if let Some(content_type) = request_content_type {
         upstream_request = upstream_request.header("content-type", content_type);
     }
-    if let Some(request_id) = request_id {
+    if let Some(request_id) = request_id_header {
         upstream_request = upstream_request.header("x-request-id", request_id);
     }
 
@@ -465,10 +601,18 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     }
     let (tx, rx) = channel(32);
     let tx_task = tx.clone();
-    let byte_budget = ByteBudget::new(OUTPUT_BYTE_BUDGET);
+    let byte_budget = ByteBudget::with_tenant(
+        tenant_id,
+        state.tenant_budgets.clone(),
+        state.global_memory.clone(),
+        OUTPUT_BYTE_BUDGET,
+    );
     let private_key = state.proxy_private_key.clone();
+    let receipt_request_id = request_id.clone();
+    let receipt_tenant_id = tenant_id_hex;
     let mut stream_shutdown = state.shutdown.clone();
-    let active_vault = state.vault.load_full();
+    let active_engine_state = state.engine_state.load_full();
+    let receipt_policy_digest = active_engine_state.policy_digest();
     tokio::spawn(async move {
         struct ActiveStreamGuard {
             active_sse: bool,
@@ -482,12 +626,23 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         }
         let _guard = ActiveStreamGuard { active_sse: is_sse };
         let _stream_permit = stream_permit;
+        let _stream_memory_permit = stream_memory_permit;
         let mut stream = upstream_response.bytes_stream();
-        let mut redactor = StreamRedactor::new(active_vault.as_ref());
+        let mut redactor = StreamRedactor::from_state(active_engine_state);
         let mut hasher = blake3::Hasher::new();
-        let mut done_detector = DoneDetector::default();
+        let mut done_detector = DoneDetector::new(
+            receipt_request_id,
+            receipt_tenant_id,
+            receipt_policy_digest,
+        );
+        let mut downstream_closed = false;
         let reached_eof = loop {
             let item = match tokio::select! {
+                _ = tx_task.closed() => {
+                    tracing::warn!("Client disconnected mid-stream...");
+                    downstream_closed = true;
+                    break false;
+                }
                 _ = stream_shutdown.changed() => {
                     if *stream_shutdown.borrow() {
                         let events = done_detector.shutdown_events(&private_key, &mut hasher);
@@ -503,6 +658,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                 Ok(item) => item,
                 Err(_) => {
                     tracing::warn!("upstream stream idle timeout");
+                    send_terminal_error(&tx_task, &byte_budget, "upstream_idle_timeout").await;
                     return;
                 }
             };
@@ -530,24 +686,44 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                                 }
                             } else {
                                 hasher.update(&bytes);
-                                if enqueue(&tx_task, &byte_budget, bytes).await.is_err() {
-                                    tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
-                                    return;
+                                if let Err(error) = enqueue_with_timeout(&tx_task, &byte_budget, bytes).await {
+                                    match error {
+                                        EnqueueError::Budget(BudgetError::TenantLimitExceeded) => {
+                                            tracing::warn!("tenant byte budget exceeded for downstream stream");
+                                            send_terminal_error(&tx_task, &byte_budget, "tenant_limit_exceeded").await;
+                                            return;
+                                        }
+                                        EnqueueError::Budget(BudgetError::GlobalLimitExceeded) => {
+                                            tracing::warn!("global memory budget exhausted for downstream stream");
+                                            send_terminal_error(&tx_task, &byte_budget, "global_limit_exceeded").await;
+                                            return;
+                                        }
+                                        _ => {
+                                            tracing::warn!("downstream enqueue failed or timed out; aborting upstream stream");
+                                            send_terminal_error(&tx_task, &byte_budget, "downstream_enqueue_failed").await;
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                     Err(error) => {
                         tracing::warn!("upstream stream rejected: {:?}", error);
+                        send_terminal_error(&tx_task, &byte_budget, "redaction_failed").await;
                         return;
                     }
                 },
                 Err(error) => {
                     tracing::warn!(error = %error, "error reading upstream chunk");
+                    send_terminal_error(&tx_task, &byte_budget, "upstream_read_failed").await;
                     return;
                 }
             }
         };
+        if downstream_closed {
+            return;
+        }
         match redactor.finish() {
             Ok(outputs) => {
                 for output in outputs {
@@ -567,14 +743,30 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
                         }
                     } else {
                         hasher.update(&bytes);
-                        if enqueue(&tx_task, &byte_budget, bytes).await.is_err() {
-                            tracing::warn!("downstream send failed: receiver dropped; aborting upstream stream");
-                            return;
+                        if let Err(error) = enqueue_with_timeout(&tx_task, &byte_budget, bytes).await {
+                            match error {
+                                EnqueueError::Budget(BudgetError::TenantLimitExceeded) => {
+                                    tracing::warn!("tenant byte budget exceeded while finalizing stream");
+                                    return;
+                                }
+                                EnqueueError::Budget(BudgetError::GlobalLimitExceeded) => {
+                                    tracing::warn!("global memory budget exhausted while finalizing stream");
+                                    return;
+                                }
+                                _ => {
+                                    tracing::warn!("downstream enqueue failed or timed out; aborting upstream stream");
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
             }
-            Err(error) => tracing::warn!("upstream stream rejected at end: {:?}", error),
+            Err(error) => {
+                tracing::warn!("upstream stream rejected at end: {:?}", error);
+                send_terminal_error(&tx_task, &byte_budget, "redaction_finish_failed").await;
+                return;
+            }
         }
         if is_sse
             && forward_stream_events(
@@ -613,12 +805,50 @@ fn contains_body_limit_error(error: &(dyn Error + 'static)) -> bool {
     error.source().is_some_and(contains_body_limit_error)
 }
 
-fn build_proxy_audit_frame(receipt: &str, signature: &str) -> Bytes {
+fn build_proxy_audit_frame(receipt_json: &[u8], signature: &str) -> Bytes {
+    let receipt_json = String::from_utf8_lossy(receipt_json);
     let body = format!(
-        "\nevent: proxy_audit\ndata: {{\"receipt\": \"{}\", \"signature\": \"{}\"}}\n\n",
-        receipt, signature
+        "\nevent: proxy_audit\ndata: {{\"receipt\": {}, \"signature\": \"{}\"}}\n\n",
+        receipt_json, signature
     );
     Bytes::copy_from_slice(body.as_bytes())
+}
+
+#[derive(Debug, Serialize)]
+struct AttestedReceipt {
+    request_id: String,
+    tenant_id: String,
+    payload_hash: String,
+    policy_digest: String,
+    timestamp: u64,
+}
+
+async fn enqueue_with_timeout(
+    sender: &crate::budget_queue::SegmentSender,
+    budget: &ByteBudget,
+    bytes: Bytes,
+) -> Result<(), EnqueueError> {
+    match tokio::time::timeout(Duration::from_secs(5), enqueue(sender, budget, bytes)).await {
+        Ok(result) => result,
+        Err(_) => {
+            metrics::increment_counter!("proxy_slowloris_guillotine_total");
+            tracing::warn!(
+                "DOWNSTREAM DEADLOCK DETECTED: Slowloris Guillotine triggered. Dropping stream."
+            );
+            Err(EnqueueError::Capacity)
+        }
+    }
+}
+
+async fn send_terminal_error(
+    sender: &crate::budget_queue::SegmentSender,
+    budget: &ByteBudget,
+    reason: &str,
+) {
+    let frame = Bytes::from(format!(
+        "data: {{\"error\": \"proxy_terminated\", \"reason\": \"{reason}\"}}\n\n"
+    ));
+    let _ = enqueue_with_timeout(sender, budget, frame).await;
 }
 
 async fn forward_stream_events(
@@ -632,7 +862,9 @@ async fn forward_stream_events(
             | StreamEvent::AuditReceipt(bytes)
             | StreamEvent::DoneMarker(bytes) => bytes,
         };
-        enqueue(sender, budget, bytes).await.map_err(|_| ())?;
+        enqueue_with_timeout(sender, budget, bytes)
+            .await
+            .map_err(|_| ())?;
     }
     Ok(())
 }
@@ -641,9 +873,22 @@ async fn forward_stream_events(
 pub struct DoneDetector {
     trailing: BytesMut,
     completed: bool,
+    request_id: String,
+    tenant_id: String,
+    policy_digest: String,
 }
 
 impl DoneDetector {
+    pub fn new(request_id: String, tenant_id: String, policy_digest: String) -> Self {
+        Self {
+            trailing: BytesMut::new(),
+            completed: false,
+            request_id,
+            tenant_id,
+            policy_digest,
+        }
+    }
+
     pub fn inspect(
         &mut self,
         bytes: Bytes,
@@ -751,9 +996,19 @@ impl DoneDetector {
         private_key: &SigningKey,
         hasher: &mut blake3::Hasher,
     ) -> Vec<StreamEvent> {
-        let digest = hasher.finalize().to_hex().to_string();
-        let signature = private_key.sign(digest.as_bytes());
-        let audit = build_proxy_audit_frame(&digest, &B64Std.encode(signature.to_bytes()));
+        let receipt = AttestedReceipt {
+            request_id: self.request_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            payload_hash: hasher.finalize().to_hex().to_string(),
+            policy_digest: self.policy_digest.clone(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        let receipt_json = serde_json::to_vec(&receipt).expect("receipt should serialize");
+        let signature = private_key.sign(&receipt_json);
+        let audit = build_proxy_audit_frame(&receipt_json, &B64Std.encode(signature.to_bytes()));
         self.completed = true;
         vec![
             StreamEvent::AuditReceipt(audit),
@@ -802,7 +1057,7 @@ fn proxy_audit_frame_is_emitted_before_done_event_and_signature_checks() {
     let receipt_hash = "9f3d74c42bb0c3d4d908a3d77dcb75a6c4df9c1d89b24fd9ba3c4405d5a2dc81";
     let signature = key.sign(receipt_hash.as_bytes());
     let signature_b64 = StdBase64.encode(signature.to_bytes());
-    let frame = build_proxy_audit_frame(receipt_hash, &signature_b64);
+    let frame = build_proxy_audit_frame(receipt_hash.as_bytes(), &signature_b64);
     let done = Bytes::from_static(b"data: [DONE]\n\n");
     let combined = [frame.as_ref(), done.as_ref()].concat();
 

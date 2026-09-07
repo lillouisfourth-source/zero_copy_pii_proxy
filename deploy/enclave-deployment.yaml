@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pii-proxy-enclave
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pii-proxy-enclave
+  template:
+    metadata:
+      labels:
+        app: pii-proxy-enclave
+    spec:
+      nodeSelector:
+        nitro-enclaves: "true"
+      containers:
+        - name: nitro-orchestrator
+          image: your-ecr-repo/nitro-orchestrator:latest
+          resources:
+            requests:
+              cpu: "2"
+              memory: "1024Mi"
+              hugepages-2Mi: "100Mi"
+            limits:
+              cpu: "2"
+              memory: "1024Mi"
+              hugepages-2Mi: "100Mi"
+              aws.amazon.com/nitro-enclaves: "1"

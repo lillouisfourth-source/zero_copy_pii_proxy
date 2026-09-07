@@ -1,0 +1,24 @@
+FROM rust:1.98.0-alpine3.24 AS builder
+
+RUN apk add --no-cache musl-dev
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+RUN cargo build --release --target x86_64-unknown-linux-musl --locked \
+    --features host-bridge --bin host_relay
+
+FROM amazonlinux:2023
+
+RUN dnf install -y aws-nitro-enclaves-cli jq util-linux iproute \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+COPY enclave.eif /enclave.eif
+COPY deploy/pod_entrypoint.sh /pod_entrypoint.sh
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/host_relay /usr/local/bin/host_relay
+
+RUN chmod 0755 /pod_entrypoint.sh /usr/local/bin/host_relay
+
+ENTRYPOINT ["/pod_entrypoint.sh"]

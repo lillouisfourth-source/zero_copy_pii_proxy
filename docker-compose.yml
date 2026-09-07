@@ -1,53 +1,20 @@
 version: '3.8'
+
 services:
-  mock-upstream:
-    image: node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293
-    working_dir: /app
-    volumes:
-      - ./mock_upstream.js:/app/mock_upstream.js
-    command: node mock_upstream.js
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
     ports:
-      - "8081:8081"
-
-  proxy:
-    build: 
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-      - "9090:9090"
+      - "4566:4566"
     environment:
-      - RUST_LOG=info
-      - PROXY_AUTH_FILE=/run/secrets/proxy-auth
-      - PROXY_PRIVATE_KEY=${PROXY_PRIVATE_KEY:?set PROXY_PRIVATE_KEY to a 32-byte hex or base64 seed}
-      - UPSTREAM_API_URL=http://mock-upstream:8081
-    secrets:
-      - proxy-auth
-    depends_on:
-      - mock-upstream
-
-  prometheus:
-    image: prom/prometheus:v2.45.0@sha256:9309deb7c981e8a94584d9ed689fd62f7ac4549d816fd3881550311cf056a237
-    ports:
-      - "9091:9090"
+      - SERVICES=kms
+      - DEBUG=1
+      - DOCKER_HOST=unix:///var/run/docker.sock
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-    depends_on:
-      - proxy
+      - ./init-aws.sh:/docker-entrypoint-initaws.d/init-aws.sh:ro
+      - ./.aws-mock:/var/lib/localstack/mock
+      - localstack-data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
 
-  grafana:
-    image: grafana/grafana:10.0.0@sha256:4d5308c296c49ec57b6e73854b041c731edab19571f41fa1c588dbd7288eba38
-    ports:
-      - "3001:3000"
-    environment:
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-    volumes:
-      - ./grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
-      - ./grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./grafana-provisioning/dashboards:/var/lib/grafana/dashboards:ro
-    depends_on:
-      - prometheus
-
-secrets:
-  proxy-auth:
-    file: ./proxy-auth.txt
+volumes:
+  localstack-data:

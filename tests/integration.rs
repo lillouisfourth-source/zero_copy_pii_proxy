@@ -1,7 +1,6 @@
 use futures::StreamExt;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use reqwest::Client;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::time::{sleep, Duration};
@@ -23,6 +22,7 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
         &patterns,
         &replacements,
     )));
+    let initial_engine_state = vault.load_full().engine_state.as_ref().clone();
 
     // Start a tiny upstream server that streams a single SSE chunk and then sleeps briefly
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -50,14 +50,21 @@ async fn drop_guard_prevents_leak_of_active_sse_streams() {
             .build()
             .unwrap(),
         vault,
-        auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(HashSet::from([
-            *blake3::hash(api_key.as_bytes()).as_bytes(),
-        ]))),
+        engine_state: Arc::new(arc_swap::ArcSwap::from_pointee(initial_engine_state)),
+        auth_keyring: Arc::new(arc_swap::ArcSwap::from_pointee(vec![*blake3::hash(
+            api_key.as_bytes(),
+        )
+        .as_bytes()])),
+        admin_bearer_token_hash: *blake3::hash(b"admin_key").as_bytes(),
+        attestation_document: Arc::new(Vec::new()),
         upstream_url,
         allowed_origins: Vec::new(),
         prometheus_handle: prometheus_handle.clone(),
+        metrics_handle: (*prometheus_handle).clone(),
         proxy_private_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         shutdown: tokio::sync::watch::channel(false).1,
+        global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
+        tenant_budgets: Arc::new(dashmap::DashMap::new()),
     });
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

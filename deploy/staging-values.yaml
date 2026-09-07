@@ -1,0 +1,26 @@
+replicaCount: 1
+
+image:
+  repository: yourregistry/zero_copy_pii_proxy
+  tag: staging
+  pullPolicy: IfNotPresent
+
+config:
+  proxyPort: 3000
+  upstreamApiUrl: "https://api.staging.example.com/v1/chat/completions"
+  allowedOrigins: "https://staging.example.com"
+  piiPatterns: "password,secret,ssn"
+  shutdownTimeoutSec: 110
+
+networkPolicy:
+  enabled: true
+  coreDnsCidr: "10.96.0.10/32"
+  kmsVpcEndpointCidr: "10.0.0.0/16"
+  upstreamApiCidr: "203.0.113.0/24"
+  upstreamApiPort: 443
+  mockEgressEnabled: false
+
+secrets:
+  authTokens: "staging-auth-token-1"
+  adminBearerToken: "staging-admin-bearer-token"
+  mockKmsCiphertext: ""

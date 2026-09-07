@@ -62,7 +62,7 @@ Start the observability stack with Prometheus and Grafana automatically:
 docker-compose up -d --build
 ```
 
-Compose requires `proxy-auth.txt` with one valid token per line and a `PROXY_PRIVATE_KEY` environment variable containing a 32-byte hex or base64 seed.
+Compose requires `proxy-auth.txt` with one valid token per line and an `ADMIN_BEARER_TOKEN` for policy administration. Receipt signing keys are generated ephemerally at boot.
 
 - Mock upstream (Mock SSE generator): http://localhost:8081
 - Proxy: http://localhost:3000/
@@ -101,7 +101,7 @@ docker build -t zero-copy-pii-proxy:latest .
 Run the container:
 
 ```bash
-docker run -e PROXY_AUTH_FILE=/run/secrets/proxy-auth -e PROXY_PRIVATE_KEY=<32-byte-seed> -p 3000:3000 -p 9090:9090 zero-copy-pii-proxy:latest
+docker run -e PROXY_AUTH_FILE=/run/secrets/proxy-auth -e ADMIN_BEARER_TOKEN=<admin-token> -p 3000:3000 -p 9090:9090 zero-copy-pii-proxy:latest
 ```
 
 Notes:

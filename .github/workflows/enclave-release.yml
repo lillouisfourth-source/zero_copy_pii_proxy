@@ -1,0 +1,93 @@
+name: Nitro Enclave Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-eif:
+    runs-on: ubuntu-latest
+    outputs:
+      pcr0: ${{ steps.pcr0.outputs.pcr0 }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build deterministic Nitro image run 1
+        run: docker build --no-cache --provenance=false --build-arg SOURCE_DATE_EPOCH=1704067200 --build-arg CARGO_FEATURES="--features nitro" -t pii-proxy-enclave:run1 -f Dockerfile.enclave .
+
+      - name: Build EIF run 1
+        run: |
+          docker run --rm --privileged --network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$GITHUB_WORKSPACE":/workspace -w /workspace amazonlinux:2023 bash -lc '
+              set -euxo pipefail
+              dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq
+              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run1 --output-file enclave_run1.eif > build_run1.json
+              jq -r .Measurements.PCR0 build_run1.json > pcr0_run1.txt
+            '
+
+      - name: Build deterministic Nitro image run 2
+        run: docker build --no-cache --provenance=false --build-arg SOURCE_DATE_EPOCH=1704067200 --build-arg CARGO_FEATURES="--features nitro" -t pii-proxy-enclave:run2 -f Dockerfile.enclave .
+
+      - name: Build EIF run 2
+        run: |
+          docker run --rm --privileged --network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$GITHUB_WORKSPACE":/workspace -w /workspace amazonlinux:2023 bash -lc '
+              set -euxo pipefail
+              dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq
+              nitro-cli build-enclave --docker-uri pii-proxy-enclave:run2 --output-file enclave_run2.eif > build_run2.json
+              jq -r .Measurements.PCR0 build_run2.json > pcr0_run2.txt
+            '
+
+      - name: Verify PCR0 determinism
+        id: pcr0
+        run: |
+          set -euo pipefail
+          PCR0_RUN1="$(cat pcr0_run1.txt)"
+          PCR0_RUN2="$(cat pcr0_run2.txt)"
+          test "$PCR0_RUN1" = "$PCR0_RUN2"
+          printf '%s' "$PCR0_RUN1" > verified_pcr0.txt
+          echo "pcr0=$PCR0_RUN1" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Nitro Enclave Measurement"
+            echo
+            echo "PCR0 (Image Hash): \`$PCR0_RUN1\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload deterministic EIF artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: enclave-measurements
+          path: |
+            enclave_run1.eif
+            enclave_run2.eif
+            pcr0_run1.txt
+            pcr0_run2.txt
+            verified_pcr0.txt
+            build_run1.json
+            build_run2.json
+
+  apply-production-kms-policy:
+    needs: build-eif
+    runs-on: ubuntu-latest
+    environment: production-kms-approval
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Inject approved PCR0 and apply Terraform
+        env:
+          PCR0: ${{ needs.build-eif.outputs.pcr0 }}
+        run: |
+          test -n "$PCR0"
+          sed "s/\${pcr0_hash}/$PCR0/g" \
+            deploy/kms_trust_policy.json.tpl > terraform/kms_policy.approved.json
+          terraform -chdir=terraform/eks_enclaves init -input=false
+          terraform -chdir=terraform/eks_enclaves apply -auto-approve \
+            -var="pcr0_hash=$PCR0"

@@ -54,11 +54,11 @@ spec:
             {{- end }}
             - name: PROXY_AUTH_FILE
               value: /etc/zero-copy-pii-proxy-auth/AUTH_TOKENS
-            - name: PROXY_PRIVATE_KEY
+            - name: ADMIN_BEARER_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
-                  key: PROXY_PRIVATE_KEY
+                  key: ADMIN_BEARER_TOKEN
           volumeMounts:
             {{- if .Values.config.piiConfigMap }}
             - name: pii-config
@@ -68,6 +68,11 @@ spec:
             - name: auth-file
               mountPath: /etc/zero-copy-pii-proxy-auth
               readOnly: true
+            {{- if .Values.secrets.mockKmsCiphertext }}
+            - name: mock-ciphertext
+              mountPath: /run/secrets
+              readOnly: true
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.config.proxyPort }}
@@ -96,3 +101,11 @@ spec:
         - name: auth-file
           secret:
             secretName: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
+        {{- if .Values.secrets.mockKmsCiphertext }}
+        - name: mock-ciphertext
+          secret:
+            secretName: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
+            items:
+              - key: MOCK_KMS_CIPHERTEXT
+                path: ciphertext.b64
+        {{- end }}

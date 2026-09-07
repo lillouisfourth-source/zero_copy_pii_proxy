@@ -1,6 +1,10 @@
-#![deny(warnings)]
+#[cfg(all(
+    not(debug_assertions),
+    not(feature = "nitro"),
+    not(feature = "kind-test")
+))]
+compile_error!("Release builds MUST enable the 'nitro' feature.");
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,24 +16,31 @@ use dotenvy::dotenv;
 use ed25519_dalek::SigningKey;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+use secrecy::ExposeSecret;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::ServiceBuilder;
 
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
-use zero_copy_pii_proxy::engine::PiiVault;
+#[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
+use zero_copy_pii_proxy::attestation::LocalMockProvider;
+#[cfg(feature = "nitro")]
+use zero_copy_pii_proxy::attestation::NitroKmsProvider;
+use zero_copy_pii_proxy::attestation::{attestation_document, decrypt_upstream_api_key};
+use zero_copy_pii_proxy::engine::{EngineState, PiiVault};
 use zero_copy_pii_proxy::{active_sse_streams, make_metrics_router, make_router, AppState};
 
+#[deny(warnings)]
 #[tokio::main]
 async fn main() {
     dotenv().ok();
 
     tracing_subscriber::fmt::init();
 
-    // Build a recorder and install it as the global metrics recorder. Obtain a handle for /metrics
     let recorder = PrometheusBuilder::new().build();
-    let handle = recorder.handle();
-    metrics::set_boxed_recorder(Box::new(recorder)).expect("failed to set metrics recorder");
-    let prometheus_handle = Arc::new(handle);
+    let recorder_handle = recorder.handle();
+    metrics::set_boxed_recorder(Box::new(recorder)).expect("failed to install metrics recorder");
+    let prometheus_handle = Arc::new(recorder_handle.clone());
 
     // Load 12-factor configuration from environment
     let proxy_port = std::env::var("PROXY_PORT")
@@ -72,13 +83,16 @@ async fn main() {
         &patterns_refs,
         &replacements_refs,
     ))));
+    let engine_state = Arc::new(ArcSwap::from_pointee(
+        vault.load_full().engine_state.as_ref().clone(),
+    ));
 
-    let proxy_private_key = std::env::var("PROXY_PRIVATE_KEY")
-        .ok()
-        .and_then(parse_private_key)
-        .unwrap_or_else(|| {
-            panic!("PROXY_PRIVATE_KEY must be configured as a valid 32-byte hex or base64 seed")
-        });
+    let proxy_private_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let attestation_document = Arc::new(
+        attestation_document(proxy_private_key.verifying_key().as_bytes())
+            .await
+            .expect("failed to obtain NSM attestation document"),
+    );
 
     let auth_file = std::env::var("PROXY_AUTH_FILE")
         .map(PathBuf::from)
@@ -87,34 +101,45 @@ async fn main() {
         .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be readable"));
     let auth_keyring = Arc::new(ArcSwap::new(Arc::new(hash_keyring(&auth_source))));
     auth_source.zeroize();
+    let mut admin_bearer_token = std::env::var("ADMIN_BEARER_TOKEN")
+        .unwrap_or_else(|_| panic!("ADMIN_BEARER_TOKEN must be configured"));
+    let admin_bearer_token_hash = *blake3::hash(admin_bearer_token.as_bytes()).as_bytes();
+    admin_bearer_token.zeroize();
+    let tenant_budgets = Arc::new(dashmap::DashMap::new());
 
-    let client = Client::builder()
-        .pool_idle_timeout(Duration::from_secs(90))
-        .tcp_keepalive(Duration::from_secs(30))
-        .build()
-        .expect("failed to build upstream HTTP client");
+    let client = build_upstream_client().await;
     let shutdown = shutdown_signal();
     if let Some(config_path) = std::env::var("PII_CONFIG_PATH").ok().map(PathBuf::from) {
         let watch_vault = vault.clone();
+        let watch_engine_state = engine_state.clone();
         let watch_path = config_path.clone();
         tokio::task::spawn_blocking(move || {
-            watch_pii_config(&watch_path, watch_vault);
+            watch_pii_config(&watch_path, watch_vault, watch_engine_state);
         });
     }
     let watch_keyring = auth_keyring.clone();
     let watch_auth_path = auth_file.clone();
-    tokio::task::spawn_blocking(move || watch_auth_file(&watch_auth_path, watch_keyring));
+    let watch_tenant_budgets = tenant_budgets.clone();
+    tokio::task::spawn_blocking(move || {
+        watch_auth_file(&watch_auth_path, watch_keyring, watch_tenant_budgets)
+    });
 
     let metrics_app = make_metrics_router(prometheus_handle.clone());
     let app = make_router(AppState {
         client,
         vault,
+        engine_state,
         auth_keyring,
+        admin_bearer_token_hash,
+        attestation_document,
         upstream_url,
         allowed_origins,
         prometheus_handle,
+        metrics_handle: recorder_handle,
         proxy_private_key,
         shutdown: shutdown.clone(),
+        global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
+        tenant_budgets,
     });
 
     // Bind to 0.0.0.0 so Docker/K8s can route to it
@@ -168,7 +193,197 @@ async fn main() {
         .unwrap();
 }
 
-fn hash_keyring(source: &str) -> HashSet<[u8; 32]> {
+async fn build_upstream_client() -> Client {
+    #[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
+    {
+        if cfg!(debug_assertions) && std::env::var("LOCALSTACK_ENDPOINT").is_err() {
+            panic!("LOCALSTACK_ENDPOINT is required for debug-mode startup");
+        }
+        let provider = LocalMockProvider::new()
+            .await
+            .expect("failed to initialize mock KMS provider");
+        let ciphertext = if cfg!(feature = "kind-test") {
+            read_kind_ciphertext().await
+        } else {
+            read_localstack_ciphertext().await
+        };
+        let secret = decrypt_upstream_api_key(Arc::new(provider), ciphertext)
+            .await
+            .expect("failed to decrypt LocalStack fixture; refusing unauthenticated boot");
+        let mut headers = HeaderMap::new();
+        let mut authorization =
+            HeaderValue::from_str(&format!("Bearer {}", secret.expose_secret()))
+                .expect("LocalStack API key produced an invalid Authorization header");
+        authorization.set_sensitive(true);
+        headers.insert(AUTHORIZATION, authorization);
+        Client::builder()
+            .default_headers(headers)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .expect("failed to build upstream HTTP client")
+    }
+
+    #[cfg(feature = "nitro")]
+    {
+        let provider = NitroKmsProvider::new()
+            .await
+            .expect("failed to initialize Nitro KMS provider");
+        let ciphertext = read_nitro_ciphertext().await;
+        let secret = decrypt_upstream_api_key(Arc::new(provider), ciphertext)
+            .await
+            .expect("failed to decrypt Nitro secret; refusing unauthenticated boot");
+        let mut headers = HeaderMap::new();
+        let mut authorization =
+            HeaderValue::from_str(&format!("Bearer {}", secret.expose_secret()))
+                .expect("Nitro API key produced an invalid Authorization header");
+        authorization.set_sensitive(true);
+        headers.insert(AUTHORIZATION, authorization);
+        Client::builder()
+            .default_headers(headers)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .expect("failed to build upstream HTTP client")
+    }
+}
+
+#[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
+async fn read_localstack_ciphertext() -> Vec<u8> {
+    let path = Path::new(".aws-mock/ciphertext.b64");
+    for attempt in 1..=10 {
+        match tokio::fs::read_to_string(path).await {
+            Ok(contents) => {
+                let contents = contents.trim();
+                return base64::engine::general_purpose::STANDARD
+                    .decode(contents)
+                    .expect("LocalStack ciphertext fixture is not valid Base64");
+            }
+            Err(error) if attempt < 10 => {
+                tracing::warn!(attempt, %error, "waiting for LocalStack ciphertext fixture");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(error) => {
+                panic!("LocalStack ciphertext fixture unavailable after 10 attempts: {error}")
+            }
+        }
+    }
+    unreachable!()
+}
+
+#[cfg(all(any(debug_assertions, feature = "kind-test"), not(feature = "nitro")))]
+async fn read_kind_ciphertext() -> Vec<u8> {
+    let contents = tokio::fs::read_to_string("/run/secrets/ciphertext.b64")
+        .await
+        .expect("Kind ciphertext fixture is required");
+    base64::engine::general_purpose::STANDARD
+        .decode(contents.trim())
+        .expect("Kind ciphertext fixture is not valid Base64")
+}
+
+#[cfg(feature = "nitro")]
+async fn read_nitro_ciphertext() -> Vec<u8> {
+    let mut contents = tokio::fs::read_to_string("/run/secrets/ciphertext.b64")
+        .await
+        .expect("Nitro ciphertext fixture is required");
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(contents.trim())
+        .expect("Nitro ciphertext fixture is not valid Base64");
+    contents.zeroize();
+    ciphertext
+}
+
+/*
+    let client = Client::builder()
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .expect("failed to build upstream HTTP client");
+    let shutdown = shutdown_signal();
+    if let Some(config_path) = std::env::var("PII_CONFIG_PATH").ok().map(PathBuf::from) {
+        let watch_vault = vault.clone();
+        let watch_path = config_path.clone();
+        tokio::task::spawn_blocking(move || {
+            watch_pii_config(&watch_path, watch_vault);
+        });
+    }
+    let watch_keyring = auth_keyring.clone();
+    let watch_auth_path = auth_file.clone();
+    let watch_tenant_budgets = tenant_budgets.clone();
+    tokio::task::spawn_blocking(move || {
+        watch_auth_file(&watch_auth_path, watch_keyring, watch_tenant_budgets)
+    });
+
+    let metrics_app = make_metrics_router(prometheus_handle.clone());
+    let initial_engine_state = vault.load_full().engine_state.as_ref().clone();
+    let app = make_router(AppState {
+        client,
+        vault,
+        engine_state: Arc::new(ArcSwap::from_pointee(initial_engine_state)),
+        auth_keyring,
+        upstream_url,
+        allowed_origins,
+        prometheus_handle,
+        metrics_handle: recorder_handle,
+        proxy_private_key,
+        shutdown: shutdown.clone(),
+        global_memory: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
+        tenant_budgets,
+    });
+
+    // Bind to 0.0.0.0 so Docker/K8s can route to it
+    let bind_addr = format!("0.0.0.0:{}", proxy_port);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
+    tracing::info!("listening on {}", listener.local_addr().unwrap());
+    let metrics_listener = tokio::net::TcpListener::bind("0.0.0.0:9090")
+        .await
+        .expect("failed to bind metrics listener");
+
+    // Build a service with concurrency limit; the app already has the global CORS middleware applied.
+    let svc = ServiceBuilder::new()
+        .layer(ConcurrencyLimitLayer::new(1000))
+        .service(app);
+
+    let mut shutdown = shutdown;
+    let mut watchdog_shutdown = shutdown.clone();
+    let shutdown_timeout = std::env::var("SHUTDOWN_TIMEOUT_SEC")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(110);
+    tokio::spawn(async move {
+        let _ = watchdog_shutdown.changed().await;
+        tokio::time::sleep(Duration::from_secs(shutdown_timeout)).await;
+        let streams = active_sse_streams();
+        tracing::error!(
+            streams,
+            "graceful shutdown watchdog expired; forcing process exit"
+        );
+        metrics::increment_counter!("proxy_watchdog_force_kills_total");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        std::process::exit(0);
+    });
+
+    let mut metrics_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        axum::serve(metrics_listener, metrics_app)
+            .with_graceful_shutdown(async move {
+                let _ = metrics_shutdown.changed().await;
+            })
+            .await
+            .expect("metrics server failed");
+    });
+
+    axum::serve(listener, svc)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.changed().await;
+            tracing::info!("shutdown signal received; draining active connections");
+        })
+        .await
+        .unwrap();
+}
+    */
+
+fn hash_keyring(source: &str) -> Vec<[u8; 32]> {
     source
         .lines()
         .map(str::trim)
@@ -177,7 +392,11 @@ fn hash_keyring(source: &str) -> HashSet<[u8; 32]> {
         .collect()
 }
 
-fn watch_auth_file(path: &Path, keyring: Arc<ArcSwap<HashSet<[u8; 32]>>>) {
+fn watch_auth_file(
+    path: &Path,
+    keyring: Arc<ArcSwap<Vec<[u8; 32]>>>,
+    tenant_budgets: Arc<dashmap::DashMap<[u8; 32], Arc<tokio::sync::Semaphore>>>,
+) {
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = recommended_watcher(move |event: Result<Event, notify::Error>| {
@@ -199,6 +418,13 @@ fn watch_auth_file(path: &Path, keyring: Arc<ArcSwap<HashSet<[u8; 32]>>>) {
                 Ok(mut contents) => {
                     let next_keyring = Arc::new(hash_keyring(&contents));
                     contents.zeroize();
+                    if next_keyring.is_empty() {
+                        tracing::error!(
+                            "Refusing to load empty auth file; retaining previous keyring"
+                        );
+                        break;
+                    }
+                    tenant_budgets.clear();
                     keyring.store(next_keyring);
                     break;
                 }
@@ -232,24 +458,11 @@ fn parse_pii_config(source: &str) -> (Vec<String>, Vec<String>) {
     (patterns, replacements)
 }
 
-fn parse_private_key(value: String) -> Option<SigningKey> {
-    let trimmed = value.trim();
-    let raw = if trimmed.len() == 64 && trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        hex_decode(trimmed)
-    } else {
-        base64::engine::general_purpose::STANDARD
-            .decode(trimmed)
-            .ok()?
-    };
-    if raw.len() != 32 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(&raw);
-    Some(SigningKey::from_bytes(&bytes))
-}
-
-fn watch_pii_config(config_path: &Path, vault: Arc<ArcSwap<PiiVault>>) {
+fn watch_pii_config(
+    config_path: &Path,
+    vault: Arc<ArcSwap<PiiVault>>,
+    engine_state: Arc<ArcSwap<EngineState>>,
+) {
     let watch_dir = config_path
         .parent()
         .map(Path::to_path_buf)
@@ -294,21 +507,12 @@ fn watch_pii_config(config_path: &Path, vault: Arc<ArcSwap<PiiVault>>) {
         let patterns_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
         let replacements_refs: Vec<&str> = replacements.iter().map(String::as_str).collect();
         let next_vault = Arc::new(PiiVault::new(&patterns_refs, &replacements_refs));
+        let next_engine_state = Arc::new(EngineState::new(&patterns, &replacements));
         contents.zeroize();
+        engine_state.store(next_engine_state);
         vault.store(next_vault);
-        tracing::info!(path = %config_path.display(), "swapped PII vault after config update");
+        tracing::info!(path = %config_path.display(), "swapped active PII engine after config update");
     }
-}
-
-fn hex_decode(value: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    let chars: Vec<u8> = value.as_bytes().to_vec();
-    for chunk in chars.chunks(2) {
-        let hex = std::str::from_utf8(chunk).unwrap();
-        let byte = u8::from_str_radix(hex, 16).unwrap_or(0);
-        bytes.push(byte);
-    }
-    bytes
 }
 
 /// Waits for ctrl+c and then returns, used for graceful shutdown registration.

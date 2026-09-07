@@ -1,0 +1,13 @@
+[Unit]
+Description=Parent EC2 Nitro Enclave VSOCK host relay
+After=network-online.target nitro-enclaves-allocator.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/host_relay
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

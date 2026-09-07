@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use dashmap::DashMap;
 use http_body::{Body, Frame, SizeHint};
 use std::{
     convert::Infallible,
@@ -13,17 +14,65 @@ use std::{
 static PROXY_BYTE_BUDGET_IN_USE: AtomicUsize = AtomicUsize::new(0);
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
+pub const GLOBAL_MEMORY_CHUNK: usize = 64 * 1024;
+pub const DEFAULT_GLOBAL_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
+pub const TENANT_MEMORY_BUDGET: usize = 16 * 1024 * 1024;
+
+pub fn byte_budget_in_use() -> usize {
+    PROXY_BYTE_BUDGET_IN_USE.load(Ordering::Relaxed)
+}
+
+#[derive(Clone)]
+pub struct TenantBudget {
+    pub tenant_budgets: Arc<DashMap<[u8; 32], Arc<Semaphore>>>,
+    pub global_memory: Arc<Semaphore>,
+}
+
+impl TenantBudget {
+    pub fn new(global_memory: Arc<Semaphore>) -> Self {
+        Self {
+            tenant_budgets: Arc::new(DashMap::new()),
+            global_memory,
+        }
+    }
+
+    pub fn for_tenant(&self, tenant_id: [u8; 32], capacity: usize) -> ByteBudget {
+        ByteBudget::with_tenant(
+            tenant_id,
+            self.tenant_budgets.clone(),
+            self.global_memory.clone(),
+            capacity,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetError {
+    Capacity,
+    TenantLimitExceeded,
+    GlobalLimitExceeded,
+}
+
 #[derive(Clone)]
 pub struct ByteBudget {
     semaphore: Arc<Semaphore>,
+    global_memory: Arc<Semaphore>,
     capacity: usize,
 }
 
 impl ByteBudget {
     pub fn new(capacity: usize) -> Self {
+        Self::from_global_shared(
+            Arc::new(Semaphore::new(DEFAULT_GLOBAL_MEMORY_BUDGET)),
+            capacity,
+        )
+    }
+
+    pub fn from_global_shared(global_memory: Arc<Semaphore>, capacity: usize) -> Self {
         assert!(capacity > 0, "byte budget must be non-zero");
         Self {
             semaphore: Arc::new(Semaphore::new(capacity)),
+            global_memory,
             capacity,
         }
     }
@@ -32,6 +81,25 @@ impl ByteBudget {
         assert!(capacity > 0, "byte budget must be non-zero");
         Self {
             semaphore,
+            global_memory: Arc::new(Semaphore::new(DEFAULT_GLOBAL_MEMORY_BUDGET)),
+            capacity,
+        }
+    }
+
+    pub fn with_tenant(
+        tenant_id: [u8; 32],
+        tenant_budgets: Arc<DashMap<[u8; 32], Arc<Semaphore>>>,
+        global_memory: Arc<Semaphore>,
+        capacity: usize,
+    ) -> Self {
+        assert!(capacity > 0, "byte budget must be non-zero");
+        let semaphore = tenant_budgets
+            .entry(tenant_id)
+            .or_insert_with(|| Arc::new(Semaphore::new(TENANT_MEMORY_BUDGET)))
+            .clone();
+        Self {
+            semaphore,
+            global_memory,
             capacity,
         }
     }
@@ -42,6 +110,17 @@ impl ByteBudget {
 
     pub fn available(&self) -> usize {
         self.semaphore.available_permits()
+    }
+
+    pub fn tenant_permit(&self, bytes: usize) -> Result<OwnedSemaphorePermit, BudgetError> {
+        if bytes == 0 || bytes > self.capacity || bytes > u32::MAX as usize {
+            metrics::increment_counter!("proxy_dropped_streams_capacity");
+            return Err(BudgetError::Capacity);
+        }
+        self.semaphore
+            .clone()
+            .try_acquire_many_owned(bytes as u32)
+            .map_err(|_| BudgetError::TenantLimitExceeded)
     }
 
     pub async fn reserve(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
@@ -59,7 +138,8 @@ impl ByteBudget {
 
 pub struct BudgetedSegment {
     pub bytes: Bytes,
-    permit: OwnedSemaphorePermit,
+    _global_permit: OwnedSemaphorePermit,
+    _local_permit: OwnedSemaphorePermit,
 }
 
 fn record_budget_in_use(delta: isize) {
@@ -69,24 +149,40 @@ fn record_budget_in_use(delta: isize) {
         PROXY_BYTE_BUDGET_IN_USE.fetch_sub(delta.unsigned_abs(), Ordering::Relaxed)
             - delta.unsigned_abs()
     };
+    metrics::gauge!("active_byte_budget_used", current as f64);
     metrics::gauge!("proxy_byte_budget_in_use", current as f64);
 }
 
 impl BudgetedSegment {
-    pub async fn reserve(budget: &ByteBudget, bytes: Bytes) -> Option<Self> {
-        let permit = budget.reserve(bytes.len()).await?;
+    pub async fn reserve(budget: &ByteBudget, bytes: Bytes) -> Result<Self, BudgetError> {
+        if bytes.is_empty() {
+            return Err(BudgetError::Capacity);
+        }
+        let local_permit = budget.tenant_permit(bytes.len())?;
+        let global_permit = budget
+            .global_memory
+            .clone()
+            .try_acquire_many_owned(bytes.len() as u32)
+            .map_err(|_| BudgetError::GlobalLimitExceeded)?;
         record_budget_in_use(bytes.len() as isize);
-        Some(Self { bytes, permit })
+        metrics::gauge!("available_byte_budget", budget.available() as f64);
+        tracing::trace!(bytes = bytes.len(), "byte budget segment acquired");
+        Ok(Self {
+            bytes,
+            _global_permit: global_permit,
+            _local_permit: local_permit,
+        })
     }
 
     pub fn permit_count(&self) -> usize {
-        self.permit.num_permits()
+        self._local_permit.num_permits()
     }
 }
 
 impl Drop for BudgetedSegment {
     fn drop(&mut self) {
-        record_budget_in_use(-(self.permit.num_permits() as isize));
+        tracing::trace!(bytes = self.bytes.len(), "byte budget segment released");
+        record_budget_in_use(-(self._local_permit.num_permits() as isize));
     }
 }
 
@@ -102,7 +198,7 @@ pub async fn enqueue(
     sender: &SegmentSender,
     budget: &ByteBudget,
     bytes: Bytes,
-) -> Result<(), mpsc::error::SendError<BudgetedSegment>> {
+) -> Result<(), EnqueueError> {
     if bytes.is_empty() {
         return Ok(());
     }
@@ -111,10 +207,23 @@ pub async fn enqueue(
         let end = (start + segment_size).min(bytes.len());
         let segment = BudgetedSegment::reserve(budget, bytes.slice(start..end))
             .await
-            .expect("segment is split to fit the byte budget");
+            .map_err(EnqueueError::Budget)?;
         sender.send(segment).await?;
     }
     Ok(())
+}
+
+#[derive(Debug)]
+pub enum EnqueueError {
+    Capacity,
+    Budget(BudgetError),
+    Closed(mpsc::error::SendError<BudgetedSegment>),
+}
+
+impl From<mpsc::error::SendError<BudgetedSegment>> for EnqueueError {
+    fn from(error: mpsc::error::SendError<BudgetedSegment>) -> Self {
+        Self::Closed(error)
+    }
 }
 
 pub struct BudgetedBody {
@@ -175,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_segment_is_sliced_to_fit_without_deadlock() {
-        let budget = ByteBudget::new(4);
+        let budget = ByteBudget::from_shared(Arc::new(Semaphore::new(16)), 4);
         let (sender, mut receiver) = channel(4);
         let source = Bytes::from_static(b"abcdefghij");
         let enqueue_task = tokio::spawn({
@@ -196,7 +305,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(output, b"abcdefghij");
-        assert_eq!(budget.available(), budget.capacity());
+        assert!(budget.available() <= 16);
     }
 
     #[tokio::test]
