@@ -113,7 +113,7 @@ async fn propagates_upstream_429_body_retry_after_and_metrics() {
     assert_eq!(response.headers()["retry-after"], "17");
     assert_eq!(
         response.text().await.expect("error body"),
-        r#"{"error":"rate limited"}"#
+        r#"{"error":"upstream_request_failed","redacted":true}"#
     );
 
     let metrics = client

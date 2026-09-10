@@ -586,31 +586,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let status = StatusCode::from_u16(upstream_response.status().as_u16())
             .unwrap_or(StatusCode::BAD_GATEWAY);
         let retry_after = upstream_response.headers().get("retry-after").cloned();
-        let content_type = upstream_response.headers().get("content-type").cloned();
-        let mut body_stream = upstream_response.bytes_stream();
-        let mut body = BytesMut::with_capacity(8 * 1024);
-        let _ = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let Ok(Some(chunk)) =
-                    tokio::time::timeout(Duration::from_secs(3), body_stream.next()).await
-                else {
-                    break;
-                };
-                let Ok(chunk) = chunk else {
-                    break;
-                };
-                let remaining = 8 * 1024 - body.len();
-                if remaining == 0 {
-                    break;
-                }
-                let take = chunk.len().min(remaining);
-                body.extend_from_slice(&chunk[..take]);
-                if take == remaining {
-                    break;
-                }
-            }
-        })
-        .await;
+        let body = Bytes::from_static(br#"{"error":"upstream_request_failed","redacted":true}"#);
         let status_label = status.as_u16().to_string();
         metrics::increment_counter!(
             "upstream_error_total",
@@ -620,10 +596,14 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         if let Some(value) = retry_after {
             response = response.header("retry-after", value);
         }
-        if let Some(value) = content_type {
-            response = response.header("content-type", value);
-        }
-        return response.body(Body::from(body.freeze())).unwrap();
+        return response
+            .header("content-type", "application/json")
+            .header(
+                "x-redaction-digest",
+                blake3::hash(body.as_ref()).to_hex().to_string(),
+            )
+            .body(Body::from(body))
+            .unwrap();
     }
 
     let upstream_content_type = upstream_response.headers().get("content-type").cloned();
