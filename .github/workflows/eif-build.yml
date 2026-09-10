@@ -122,6 +122,15 @@ jobs:
             --set-string secrets.authTokens=test_key \
             --set-string secrets.mockKmsCiphertext=dGVzdF9rZXk=
       - run: kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=zero-copy-pii-proxy --timeout=120s
+      - name: Dump Kubernetes Diagnostics on Failure
+        if: failure()
+        run: |
+          echo "=== POD DESCRIPTIONS ==="
+          kubectl describe pods -l app.kubernetes.io/name=zero-copy-pii-proxy
+          echo "=== POD LOGS ==="
+          kubectl logs -l app.kubernetes.io/name=zero-copy-pii-proxy --all-containers=true --tail=200
+          echo "=== SECRETS & CONFIGMAPS ==="
+          kubectl get secrets,configmaps -A
       - name: Port-forward and smoke test
         shell: bash
         run: |

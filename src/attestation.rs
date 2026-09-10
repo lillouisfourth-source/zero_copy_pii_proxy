@@ -3,18 +3,36 @@ use secrecy::SecretString;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-pub async fn attestation_document(public_key: &[u8; 32]) -> Result<Vec<u8>, String> {
+const ATTESTATION_NONCE_LEN: usize = 32;
+
+fn validate_nonce(nonce: Option<&[u8]>) -> Result<(), String> {
+    if let Some(nonce) = nonce {
+        if nonce.len() != ATTESTATION_NONCE_LEN {
+            return Err(format!(
+                "attestation nonce must be exactly {ATTESTATION_NONCE_LEN} bytes"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub async fn attestation_document(
+    public_key: &[u8; 32],
+    nonce: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    validate_nonce(nonce.as_deref())?;
     #[cfg(feature = "nitro")]
     {
         let nsm_fd = std::fs::File::open("/dev/nsm")
             .map_err(|error| format!("Failed to open /dev/nsm: {error}"))?;
         use std::os::fd::AsRawFd;
         let public_key = public_key.to_vec();
+        let nonce = nonce.map(Into::into);
         let response = tokio::task::spawn_blocking(move || {
             aws_nitro_enclaves_nsm_api::driver::nsm_process_request(
                 nsm_fd.as_raw_fd(),
                 aws_nitro_enclaves_nsm_api::api::Request::Attestation {
-                    nonce: None,
+                    nonce,
                     public_key: None,
                     user_data: Some(public_key.into()),
                 },
@@ -31,6 +49,7 @@ pub async fn attestation_document(public_key: &[u8; 32]) -> Result<Vec<u8>, Stri
     #[cfg(not(feature = "nitro"))]
     {
         let public_key = public_key.to_vec();
+        let nonce = nonce.unwrap_or_default();
         let pcr0 = std::env::var("MOCK_PCR0").unwrap_or_else(|_| "00".repeat(48));
         let document = ciborium::Value::Map(vec![
             (
@@ -44,6 +63,10 @@ pub async fn attestation_document(public_key: &[u8; 32]) -> Result<Vec<u8>, Stri
             (
                 ciborium::Value::Text("public_key".into()),
                 ciborium::Value::Bytes(public_key),
+            ),
+            (
+                ciborium::Value::Text("nonce".into()),
+                ciborium::Value::Bytes(nonce),
             ),
             (
                 ciborium::Value::Text("pcr0".into()),
@@ -165,11 +188,13 @@ impl KmsProvider for NitroKmsProvider {
         let nsm_fd = std::fs::File::open("/dev/nsm")
             .map_err(|error| format!("Failed to open /dev/nsm: {error}"))?;
         use std::os::fd::AsRawFd;
+        let mut nonce = [0u8; ATTESTATION_NONCE_LEN];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
         let attestation_response = tokio::task::spawn_blocking(move || {
             aws_nitro_enclaves_nsm_api::driver::nsm_process_request(
                 nsm_fd.as_raw_fd(),
                 aws_nitro_enclaves_nsm_api::api::Request::Attestation {
-                    nonce: None,
+                    nonce: Some(nonce.to_vec().into()),
                     public_key: Some(public_key_der.into()),
                     user_data: None,
                 },

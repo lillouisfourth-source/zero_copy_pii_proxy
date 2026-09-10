@@ -88,10 +88,15 @@ async fn main() {
     ));
 
     let proxy_private_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let mut attestation_nonce = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut attestation_nonce);
     let attestation_document = Arc::new(
-        attestation_document(proxy_private_key.verifying_key().as_bytes())
-            .await
-            .expect("failed to obtain NSM attestation document"),
+        attestation_document(
+            proxy_private_key.verifying_key().as_bytes(),
+            Some(attestation_nonce.to_vec()),
+        )
+        .await
+        .expect("failed to obtain NSM attestation document"),
     );
 
     let auth_file = std::env::var("PROXY_AUTH_FILE")

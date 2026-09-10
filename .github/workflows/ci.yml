@@ -190,6 +190,15 @@ jobs:
             --set containerSecurityContext.capabilities.drop[0]=ALL
       - name: Wait for deployment readiness
         run: kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=zero-copy-pii-proxy --timeout=90s
+      - name: Dump Kubernetes Diagnostics on Failure
+        if: failure()
+        run: |
+          echo "=== POD DESCRIPTIONS ==="
+          kubectl describe pods -l app.kubernetes.io/name=zero-copy-pii-proxy
+          echo "=== POD LOGS ==="
+          kubectl logs -l app.kubernetes.io/name=zero-copy-pii-proxy --all-containers=true --tail=200
+          echo "=== SECRETS & CONFIGMAPS ==="
+          kubectl get secrets,configmaps -A
       - name: Preflight mock DNS and TCP routing
         shell: bash
         run: |
