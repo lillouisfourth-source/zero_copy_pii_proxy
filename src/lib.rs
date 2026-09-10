@@ -648,6 +648,9 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     let mut stream_shutdown = state.shutdown.clone();
     let active_engine_state = state.engine_state.load_full();
     let receipt_policy_digest = active_engine_state.policy_digest();
+    let receipt_pcr0 = std::env::var("PCR0_HASH")
+        .or_else(|_| std::env::var("MOCK_PCR0"))
+        .unwrap_or_else(|_| "unknown-pcr0".to_string());
     tokio::spawn(async move {
         struct ActiveStreamGuard {
             active_sse: bool,
@@ -669,6 +672,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
             receipt_request_id,
             receipt_tenant_id,
             receipt_policy_digest,
+            receipt_pcr0,
         );
         let mut downstream_closed = false;
         let reached_eof = loop {
@@ -855,7 +859,32 @@ struct AttestedReceipt {
     tenant_id: String,
     payload_hash: String,
     policy_digest: String,
+    pcr0: String,
+    tuple_digest: String,
     timestamp: u64,
+}
+
+fn canonical_receipt_digest(
+    request_id: &str,
+    tenant_id: &str,
+    policy_digest: &str,
+    pcr0: &str,
+    redacted_response_hash: &str,
+) -> blake3::Hash {
+    let fields = [
+        request_id,
+        tenant_id,
+        policy_digest,
+        pcr0,
+        redacted_response_hash,
+    ];
+    let mut canonical = Vec::new();
+    for field in fields {
+        let bytes = field.as_bytes();
+        canonical.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(bytes);
+    }
+    blake3::hash(&canonical)
 }
 
 async fn enqueue_with_timeout(
@@ -911,16 +940,18 @@ pub struct DoneDetector {
     request_id: String,
     tenant_id: String,
     policy_digest: String,
+    pcr0: String,
 }
 
 impl DoneDetector {
-    pub fn new(request_id: String, tenant_id: String, policy_digest: String) -> Self {
+    pub fn new(request_id: String, tenant_id: String, policy_digest: String, pcr0: String) -> Self {
         Self {
             trailing: BytesMut::new(),
             completed: false,
             request_id,
             tenant_id,
             policy_digest,
+            pcr0,
         }
     }
 
@@ -1031,18 +1062,28 @@ impl DoneDetector {
         private_key: &SigningKey,
         hasher: &mut blake3::Hasher,
     ) -> Vec<StreamEvent> {
+        let payload_hash = hasher.finalize().to_hex().to_string();
+        let tuple_digest = canonical_receipt_digest(
+            &self.request_id,
+            &self.tenant_id,
+            &self.policy_digest,
+            &self.pcr0,
+            &payload_hash,
+        );
         let receipt = AttestedReceipt {
             request_id: self.request_id.clone(),
             tenant_id: self.tenant_id.clone(),
-            payload_hash: hasher.finalize().to_hex().to_string(),
+            payload_hash,
             policy_digest: self.policy_digest.clone(),
+            pcr0: self.pcr0.clone(),
+            tuple_digest: tuple_digest.to_hex().to_string(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
         };
         let receipt_json = serde_json::to_vec(&receipt).expect("receipt should serialize");
-        let signature = private_key.sign(&receipt_json);
+        let signature = private_key.sign(tuple_digest.as_bytes());
         let audit = build_proxy_audit_frame(&receipt_json, &B64Std.encode(signature.to_bytes()));
         self.completed = true;
         vec![
@@ -1089,8 +1130,14 @@ fn proxy_audit_frame_is_emitted_before_done_event_and_signature_checks() {
     use ed25519_dalek::{Signature, Verifier};
 
     let key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let request_id = "request-1";
+    let tenant_id = "tenant-1";
+    let policy_digest = "policy-1";
+    let pcr0 = "pcr0-1";
     let receipt_hash = "9f3d74c42bb0c3d4d908a3d77dcb75a6c4df9c1d89b24fd9ba3c4405d5a2dc81";
-    let signature = key.sign(receipt_hash.as_bytes());
+    let tuple_digest =
+        canonical_receipt_digest(request_id, tenant_id, policy_digest, pcr0, receipt_hash);
+    let signature = key.sign(tuple_digest.as_bytes());
     let signature_b64 = StdBase64.encode(signature.to_bytes());
     let frame = build_proxy_audit_frame(receipt_hash.as_bytes(), &signature_b64);
     let done = Bytes::from_static(b"data: [DONE]\n\n");
@@ -1110,7 +1157,7 @@ fn proxy_audit_frame_is_emitted_before_done_event_and_signature_checks() {
     let signature_bytes = StdBase64.decode(signature_b64.as_bytes()).unwrap();
     let signature = Signature::from_slice(&signature_bytes).unwrap();
     key.verifying_key()
-        .verify(receipt_hash.as_bytes(), &signature)
+        .verify(tuple_digest.as_bytes(), &signature)
         .unwrap();
 }
 
