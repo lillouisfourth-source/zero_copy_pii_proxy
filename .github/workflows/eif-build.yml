@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build non-Nitro functional image
-        run: docker build --build-arg CARGO_FEATURES="--features kind-test" -t zero-copy-pii-proxy:kind .
+        run: docker build -f Dockerfile.mock -t zero-copy-pii-proxy:kind .
       - uses: helm/kind-action@v1.12.0
         with:
           cluster_name: chart-testing
@@ -142,7 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build non-Nitro scan image
-        run: docker build --build-arg CARGO_FEATURES="--features kind-test" -t zero-copy-pii-proxy:scan .
+        run: docker build -f Dockerfile.mock -t zero-copy-pii-proxy:scan .
       - uses: aquasecurity/trivy-action@master
         with:
           image-ref: zero-copy-pii-proxy:scan

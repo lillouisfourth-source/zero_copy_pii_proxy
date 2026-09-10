@@ -33,7 +33,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Build Docker Image
-        run: docker build -t zero-copy-pii-proxy:test .
+        run: docker build -f Dockerfile.mock -t zero-copy-pii-proxy:test .
       - name: Build Nitro orchestrator appliance
         run: |
           : > enclave.eif
