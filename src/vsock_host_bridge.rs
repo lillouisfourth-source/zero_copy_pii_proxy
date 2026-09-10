@@ -18,10 +18,20 @@ pub async fn run_host_vsock_relay(
     let target_host = target_host.to_string();
 
     loop {
-        let (vsock, _) = listener
+        let (vsock, peer_addr) = listener
             .accept()
             .await
             .map_err(|error| format!("failed to accept VSOCK connection: {error}"))?;
+        let peer_cid = peer_addr.cid();
+        if peer_cid <= 2 || peer_cid == VMADDR_CID_ANY {
+            tracing::warn!(
+                peer_cid,
+                vsock_port,
+                "rejecting VSOCK connection from invalid CID"
+            );
+            drop(vsock);
+            continue;
+        }
         let target_host = target_host.clone();
         tokio::spawn(async move {
             if target_port == 443 {
