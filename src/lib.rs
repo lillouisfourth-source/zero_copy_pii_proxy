@@ -28,7 +28,7 @@ use std::sync::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, BodyDataStream};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderValue, Method, Request, Response, StatusCode};
 use axum::middleware::Next;
 use axum::{
@@ -238,11 +238,46 @@ pub fn make_router(state: AppState) -> Router {
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
 }
 
-async fn attestation_document(State(state): State<AppState>) -> (StatusCode, String) {
-    (
-        StatusCode::OK,
-        B64Std.encode(state.attestation_document.as_ref()),
+#[derive(Debug, Deserialize)]
+struct AttestationQuery {
+    nonce: Option<String>,
+}
+
+async fn attestation_document(
+    State(state): State<AppState>,
+    Query(query): Query<AttestationQuery>,
+) -> (StatusCode, String) {
+    let Some(encoded_nonce) = query.nonce else {
+        tracing::warn!("attestation request has no nonce; freshness is not guaranteed");
+        return (
+            StatusCode::OK,
+            B64Std.encode(state.attestation_document.as_ref()),
+        );
+    };
+
+    let nonce = hex::decode(&encoded_nonce).or_else(|_| B64Std.decode(&encoded_nonce));
+    let Ok(nonce) = nonce else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "nonce must be hex or standard base64".to_string(),
+        );
+    };
+    if nonce.len() != 32 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "nonce must decode to exactly 32 bytes".to_string(),
+        );
+    }
+    let document = match crate::attestation::attestation_document(
+        state.proxy_private_key.verifying_key().as_bytes(),
+        Some(nonce),
     )
+    .await
+    {
+        Ok(document) => document,
+        Err(error) => return (StatusCode::BAD_GATEWAY, error),
+    };
+    (StatusCode::OK, B64Std.encode(document))
 }
 
 #[derive(Debug, Deserialize)]
