@@ -19,11 +19,14 @@ RUN RUSTFLAGS="${RUSTFLAGS} -C debuginfo=0 -C strip=symbols" cargo build --relea
 
 RUN strip /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy
 RUN touch -d @${SOURCE_DATE_EPOCH} /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy
+RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/app
+RUN cp /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy /rootfs/app/zero-copy-pii-proxy
+RUN cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ca-certificates.crt
+RUN find /rootfs -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 
 FROM scratch
 ENV SOURCE_DATE_EPOCH=1704067200
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/zero_copy_pii_proxy /zero_copy_pii_proxy
+COPY --from=builder /rootfs /
 
-ENTRYPOINT ["/zero_copy_pii_proxy"]
+ENTRYPOINT ["/app/zero-copy-pii-proxy"]
