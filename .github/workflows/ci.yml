@@ -179,6 +179,7 @@ jobs:
             --set image.repository=zero-copy-pii-proxy \
             --set image.tag=test \
             --set config.upstreamApiUrl=http://pii-mock.default.svc.cluster.local:8081 \
+            --set-string config.mockPcr0=000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 \
             --set networkPolicy.upstreamApiPort=443 \
             --set networkPolicy.mockEgressEnabled=true \
             --set networkPolicy.mockEgressPort=8081 \
