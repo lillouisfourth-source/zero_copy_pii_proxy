@@ -248,10 +248,9 @@ async fn attestation_document(
     Query(query): Query<AttestationQuery>,
 ) -> (StatusCode, String) {
     let Some(encoded_nonce) = query.nonce else {
-        tracing::warn!("attestation request has no nonce; freshness is not guaranteed");
         return (
-            StatusCode::OK,
-            B64Std.encode(state.attestation_document.as_ref()),
+            StatusCode::BAD_REQUEST,
+            "nonce query parameter is required".to_string(),
         );
     };
 

@@ -49,6 +49,7 @@ config:
   allowedOrigins: https://app.example.com
   piiPatterns: "password,secret,ssn"
   piiConfigMap: ""
+  mockPcr0: ""
   shutdownTimeoutSec: 110
 
 networkPolicy:

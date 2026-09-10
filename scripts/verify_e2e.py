@@ -8,8 +8,10 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import secrets
 import sys
 import urllib.request
+from urllib.parse import urlencode
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -27,7 +29,9 @@ def main() -> int:
     parser.add_argument("--expected-pcr0", required=True)
     args = parser.parse_args()
 
-    with urllib.request.urlopen(args.attestation_url, timeout=30) as attestation_response:
+    nonce = secrets.token_hex(32)
+    attestation_url = f"{args.attestation_url}?{urlencode({'nonce': nonce})}"
+    with urllib.request.urlopen(attestation_url, timeout=30) as attestation_response:
         attestation_document = decode_bytes(attestation_response.read().decode("ascii"))
     public_key = extract_attested_identity(attestation_document, args.expected_pcr0.lower(), None)
 
