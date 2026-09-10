@@ -199,10 +199,10 @@ jobs:
         run: |
           set -euo pipefail
           docker create --name extract_run1 pii-proxy-enclave:run1
-          docker cp extract_run1:/zero_copy_pii_proxy ./binary_run1
+          docker cp extract_run1:/app/zero-copy-pii-proxy ./binary_run1
           docker rm extract_run1
           docker create --name extract_run2 pii-proxy-enclave:run2
-          docker cp extract_run2:/zero_copy_pii_proxy ./binary_run2
+          docker cp extract_run2:/app/zero-copy-pii-proxy ./binary_run2
           docker rm extract_run2
           sha256sum binary_run1 binary_run2
       - name: Build EIF run 2
