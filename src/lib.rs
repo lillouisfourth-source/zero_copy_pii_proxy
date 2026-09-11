@@ -515,17 +515,16 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         .unwrap_or([0u8; 32]);
     let tenant_id_hex = hex::encode(tenant_id);
     let request_content_type = req.headers().get("content-type").cloned();
-    let request_body = match axum::body::to_bytes(req.into_body(), MAX_BODY_SIZE).await {
-        Ok(body) => body,
-        Err(_) => {
-            metrics::increment_counter!("proxy_requests_rejected_total", "reason" => "request_body");
-            return Response::builder()
-                .status(StatusCode::PAYLOAD_TOO_LARGE)
-                .body(Body::empty())
-                .unwrap();
+    let request_hasher = Arc::new(std::sync::Mutex::new(blake3::Hasher::new()));
+    let request_hasher_for_stream = request_hasher.clone();
+    let request_body = req.into_body().into_data_stream().inspect(move |result| {
+        if let Ok(chunk) = result {
+            request_hasher_for_stream
+                .lock()
+                .expect("request hasher mutex poisoned")
+                .update(chunk);
         }
-    };
-    let request_hash = blake3::hash(&request_body).to_hex().to_string();
+    });
     let private_key = state.proxy_private_key.clone();
     let receipt_policy_digest = state.engine_state.load_full().policy_digest();
     let receipt_pcr0 = std::env::var("PCR0_HASH")
@@ -563,7 +562,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     let mut upstream_request = state
         .client
         .post(&state.upstream_url)
-        .body(request_body.clone());
+        .body(reqwest::Body::wrap_stream(request_body));
     if let Some(content_type) = request_content_type {
         upstream_request = upstream_request.header("content-type", content_type);
     }
@@ -602,6 +601,12 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let status = StatusCode::from_u16(upstream_response.status().as_u16())
             .unwrap_or(StatusCode::BAD_GATEWAY);
         let retry_after = upstream_response.headers().get("retry-after").cloned();
+        let request_hash = request_hasher
+            .lock()
+            .expect("request hasher mutex poisoned")
+            .finalize()
+            .to_hex()
+            .to_string();
         let payload_hash = blake3::hash(b"TERMINAL_ERROR").to_hex().to_string();
         let tuple_digest_hash = canonical_receipt_digest(
             &request_id,
@@ -673,7 +678,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     let receipt_request_id = request_id.clone();
     let receipt_tenant_id = tenant_id_hex;
     let receipt_upstream_url = state.upstream_url.clone();
-    let receipt_request_hash = request_hash;
+    let receipt_request_hasher = request_hasher;
     let mut stream_shutdown = state.shutdown.clone();
     let active_engine_state = state.engine_state.load_full();
     tokio::spawn(async move {
@@ -697,7 +702,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
             receipt_request_id,
             receipt_tenant_id,
             receipt_upstream_url,
-            receipt_request_hash,
+            receipt_request_hasher,
             receipt_policy_digest,
             receipt_pcr0,
         );
@@ -973,7 +978,7 @@ pub struct DoneDetector {
     request_id: String,
     tenant_id: String,
     upstream_url: String,
-    request_hash: String,
+    request_hasher: Arc<std::sync::Mutex<blake3::Hasher>>,
     policy_digest: String,
     pcr0: String,
 }
@@ -983,7 +988,7 @@ impl DoneDetector {
         request_id: String,
         tenant_id: String,
         upstream_url: String,
-        request_hash: String,
+        request_hasher: Arc<std::sync::Mutex<blake3::Hasher>>,
         policy_digest: String,
         pcr0: String,
     ) -> Self {
@@ -993,7 +998,7 @@ impl DoneDetector {
             request_id,
             tenant_id,
             upstream_url,
-            request_hash,
+            request_hasher,
             policy_digest,
             pcr0,
         }
@@ -1107,11 +1112,18 @@ impl DoneDetector {
         hasher: &mut blake3::Hasher,
     ) -> Vec<StreamEvent> {
         let payload_hash = hasher.finalize().to_hex().to_string();
+        let request_hash = self
+            .request_hasher
+            .lock()
+            .expect("request hasher mutex poisoned")
+            .finalize()
+            .to_hex()
+            .to_string();
         let tuple_digest = canonical_receipt_digest(
             &self.request_id,
             &self.tenant_id,
             &self.upstream_url,
-            &self.request_hash,
+            &request_hash,
             &self.policy_digest,
             &self.pcr0,
             &payload_hash,
@@ -1120,7 +1132,7 @@ impl DoneDetector {
             request_id: self.request_id.clone(),
             tenant_id: self.tenant_id.clone(),
             upstream_url: self.upstream_url.clone(),
-            request_hash: self.request_hash.clone(),
+            request_hash,
             payload_hash,
             policy_digest: self.policy_digest.clone(),
             pcr0: self.pcr0.clone(),
