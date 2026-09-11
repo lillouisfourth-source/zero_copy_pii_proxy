@@ -643,7 +643,7 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     let receipt_policy_digest = active_engine_state.policy_digest();
     let receipt_pcr0 = std::env::var("PCR0_HASH")
         .or_else(|_| std::env::var("MOCK_PCR0"))
-        .unwrap_or_else(|_| "unknown-pcr0".to_string());
+        .expect("CRITICAL: PCR0_HASH or MOCK_PCR0 environment variable must be set. System failing closed to preserve cryptographic integrity.");
     tokio::spawn(async move {
         struct ActiveStreamGuard {
             active_sse: bool,

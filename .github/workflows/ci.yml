@@ -242,7 +242,7 @@ jobs:
         if: success()
         shell: bash
         run: |
-          python -m pip install blake3 cbor2 cryptography
+          python -m pip install blake3 cbor2 cryptography pycose
           python scripts/verify_e2e.py \
             --url http://127.0.0.1:3000/v1/chat/completions \
             --api-key test_key \

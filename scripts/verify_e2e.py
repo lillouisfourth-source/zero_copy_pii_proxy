@@ -18,7 +18,23 @@ sys.path.insert(0, str(Path(__file__).parent))
 from verify_receipt import canonical_receipt_digest, decode_bytes, extract_attested_identity
 
 import blake3
+import cbor2
+from pycose.messages import Sign1Message
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+
+def verify_attestation_nonce(document: bytes, client_nonce: bytes) -> None:
+    decoded = cbor2.loads(document)
+    if isinstance(decoded, dict) and decoded.get("format") == "local-mock-not-nitro":
+        returned_nonce = decoded.get("nonce")
+    else:
+        cose_msg = Sign1Message.decode(document)
+        payload = cbor2.loads(cose_msg.payload)
+        returned_nonce = payload.get("nonce")
+    assert returned_nonce == client_nonce, (
+        "CRITICAL: Attestation nonce mismatch. "
+        "Replay attack detected or stale hardware state."
+    )
 
 
 def main() -> int:
@@ -33,6 +49,7 @@ def main() -> int:
     attestation_url = f"{args.attestation_url}?{urlencode({'nonce': nonce})}"
     with urllib.request.urlopen(attestation_url, timeout=30) as attestation_response:
         attestation_document = decode_bytes(attestation_response.read().decode("ascii"))
+    verify_attestation_nonce(attestation_document, bytes.fromhex(nonce))
     public_key = extract_attested_identity(attestation_document, args.expected_pcr0.lower(), None)
 
     body = json.dumps({
