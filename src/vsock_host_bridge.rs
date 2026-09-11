@@ -148,13 +148,13 @@ fn validate_kms_host(authority: &str) -> Result<(), String> {
     if port != "443" || host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
         return Err("KMS CONNECT target is not an approved hostname".to_string());
     }
-    let mut labels = host.split('.');
-    let service = labels.next().unwrap_or_default();
-    let region = labels.next().unwrap_or_default();
-    if labels.next().is_some()
-        || !(service == "kms" || service == "kms-fips")
-        || region.is_empty()
-        || !region
+    let labels = host.split('.').collect::<Vec<_>>();
+    if labels.len() != 4
+        || !(labels[0] == "kms" || labels[0] == "kms-fips")
+        || labels[2] != "amazonaws"
+        || labels[3] != "com"
+        || labels[1].is_empty()
+        || !labels[1]
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     {

@@ -27,7 +27,7 @@ use std::sync::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::body::{Body, BodyDataStream};
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderValue, Method, Request, Response, StatusCode};
 use axum::middleware::Next;
@@ -515,8 +515,17 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         .unwrap_or([0u8; 32]);
     let tenant_id_hex = hex::encode(tenant_id);
     let request_content_type = req.headers().get("content-type").cloned();
-    let body_stream: BodyDataStream = req.into_body().into_data_stream();
-    let request_body = reqwest::Body::wrap_stream(body_stream);
+    let request_body = match axum::body::to_bytes(req.into_body(), MAX_BODY_SIZE).await {
+        Ok(body) => body,
+        Err(_) => {
+            metrics::increment_counter!("proxy_requests_rejected_total", "reason" => "request_body");
+            return Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .body(Body::empty())
+                .unwrap();
+        }
+    };
+    let request_hash = blake3::hash(&request_body).to_hex().to_string();
     let stream_permit = match UPSTREAM_STREAM_LIMIT.acquire().await {
         Ok(permit) => permit,
         Err(_) => {
@@ -546,7 +555,10 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         }
     };
 
-    let mut upstream_request = state.client.post(&state.upstream_url).body(request_body);
+    let mut upstream_request = state
+        .client
+        .post(&state.upstream_url)
+        .body(request_body.clone());
     if let Some(content_type) = request_content_type {
         upstream_request = upstream_request.header("content-type", content_type);
     }
@@ -624,6 +636,8 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
     let private_key = state.proxy_private_key.clone();
     let receipt_request_id = request_id.clone();
     let receipt_tenant_id = tenant_id_hex;
+    let receipt_upstream_url = state.upstream_url.clone();
+    let receipt_request_hash = request_hash;
     let mut stream_shutdown = state.shutdown.clone();
     let active_engine_state = state.engine_state.load_full();
     let receipt_policy_digest = active_engine_state.policy_digest();
@@ -650,6 +664,8 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let mut done_detector = DoneDetector::new(
             receipt_request_id,
             receipt_tenant_id,
+            receipt_upstream_url,
+            receipt_request_hash,
             receipt_policy_digest,
             receipt_pcr0,
         );
@@ -836,6 +852,8 @@ fn build_proxy_audit_frame(receipt_json: &[u8], signature: &str) -> Bytes {
 struct AttestedReceipt {
     request_id: String,
     tenant_id: String,
+    upstream_url: String,
+    request_hash: String,
     payload_hash: String,
     policy_digest: String,
     pcr0: String,
@@ -846,6 +864,8 @@ struct AttestedReceipt {
 fn canonical_receipt_digest(
     request_id: &str,
     tenant_id: &str,
+    upstream_url: &str,
+    request_hash: &str,
     policy_digest: &str,
     pcr0: &str,
     redacted_response_hash: &str,
@@ -853,6 +873,8 @@ fn canonical_receipt_digest(
     let fields = [
         request_id,
         tenant_id,
+        upstream_url,
+        request_hash,
         policy_digest,
         pcr0,
         redacted_response_hash,
@@ -918,17 +940,28 @@ pub struct DoneDetector {
     completed: bool,
     request_id: String,
     tenant_id: String,
+    upstream_url: String,
+    request_hash: String,
     policy_digest: String,
     pcr0: String,
 }
 
 impl DoneDetector {
-    pub fn new(request_id: String, tenant_id: String, policy_digest: String, pcr0: String) -> Self {
+    pub fn new(
+        request_id: String,
+        tenant_id: String,
+        upstream_url: String,
+        request_hash: String,
+        policy_digest: String,
+        pcr0: String,
+    ) -> Self {
         Self {
             trailing: BytesMut::new(),
             completed: false,
             request_id,
             tenant_id,
+            upstream_url,
+            request_hash,
             policy_digest,
             pcr0,
         }
@@ -1045,6 +1078,8 @@ impl DoneDetector {
         let tuple_digest = canonical_receipt_digest(
             &self.request_id,
             &self.tenant_id,
+            &self.upstream_url,
+            &self.request_hash,
             &self.policy_digest,
             &self.pcr0,
             &payload_hash,
@@ -1052,6 +1087,8 @@ impl DoneDetector {
         let receipt = AttestedReceipt {
             request_id: self.request_id.clone(),
             tenant_id: self.tenant_id.clone(),
+            upstream_url: self.upstream_url.clone(),
+            request_hash: self.request_hash.clone(),
             payload_hash,
             policy_digest: self.policy_digest.clone(),
             pcr0: self.pcr0.clone(),
@@ -1111,11 +1148,20 @@ fn proxy_audit_frame_is_emitted_before_done_event_and_signature_checks() {
     let key = SigningKey::generate(&mut rand::rngs::OsRng);
     let request_id = "request-1";
     let tenant_id = "tenant-1";
+    let upstream_url = "https://upstream.example/v1/chat/completions";
+    let request_hash = "request-hash-1";
     let policy_digest = "policy-1";
     let pcr0 = "pcr0-1";
     let receipt_hash = "9f3d74c42bb0c3d4d908a3d77dcb75a6c4df9c1d89b24fd9ba3c4405d5a2dc81";
-    let tuple_digest =
-        canonical_receipt_digest(request_id, tenant_id, policy_digest, pcr0, receipt_hash);
+    let tuple_digest = canonical_receipt_digest(
+        request_id,
+        tenant_id,
+        upstream_url,
+        request_hash,
+        policy_digest,
+        pcr0,
+        receipt_hash,
+    );
     let signature = key.sign(tuple_digest.as_bytes());
     let signature_b64 = StdBase64.encode(signature.to_bytes());
     let frame = build_proxy_audit_frame(receipt_hash.as_bytes(), &signature_b64);

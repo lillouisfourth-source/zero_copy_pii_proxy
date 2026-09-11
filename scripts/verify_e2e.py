@@ -78,19 +78,23 @@ def main() -> int:
     receipt = audit.get("receipt")
     if not isinstance(receipt, dict):
         raise AssertionError("receipt must be a JSON object")
-    for field in ("request_id", "tenant_id", "payload_hash", "policy_digest", "pcr0", "tuple_digest", "timestamp"):
+    for field in ("request_id", "tenant_id", "upstream_url", "request_hash", "payload_hash", "policy_digest", "pcr0", "tuple_digest", "timestamp"):
         if field not in receipt:
             raise AssertionError(f"receipt missing required field: {field}")
-    for field in ("request_id", "tenant_id", "payload_hash", "policy_digest", "pcr0", "tuple_digest"):
+    for field in ("request_id", "tenant_id", "upstream_url", "request_hash", "payload_hash", "policy_digest", "pcr0", "tuple_digest"):
         if not isinstance(receipt[field], str) or not receipt[field]:
             raise AssertionError(f"receipt field must be a non-empty string: {field}")
     if not isinstance(receipt["timestamp"], int) or receipt["timestamp"] < 0:
         raise AssertionError("receipt timestamp must be a non-negative integer")
-    if len(receipt["payload_hash"]) != 64 or len(receipt["policy_digest"]) != 64 or len(receipt["tuple_digest"]) != 64:
+    if receipt["request_hash"] != blake3.blake3(body).hexdigest():
+        raise AssertionError("request_hash does not match the request body")
+    if not receipt["upstream_url"]:
+        raise AssertionError("upstream_url must be non-empty")
+    if len(receipt["request_hash"]) != 64 or len(receipt["payload_hash"]) != 64 or len(receipt["policy_digest"]) != 64 or len(receipt["tuple_digest"]) != 64:
         raise AssertionError("receipt hashes must be 32-byte hexadecimal BLAKE3 digests")
     if len(receipt["pcr0"]) != 96:
         raise AssertionError("receipt pcr0 must be a 48-byte hexadecimal digest")
-    for field in ("payload_hash", "policy_digest", "pcr0", "tuple_digest"):
+    for field in ("request_hash", "payload_hash", "policy_digest", "pcr0", "tuple_digest"):
         try:
             bytes.fromhex(receipt[field])
         except ValueError as error:

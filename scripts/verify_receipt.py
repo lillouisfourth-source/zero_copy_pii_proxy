@@ -27,6 +27,8 @@ def canonical_receipt_digest(receipt: dict[str, object]) -> bytes:
     fields = (
         receipt["request_id"],
         receipt["tenant_id"],
+        receipt["upstream_url"],
+        receipt["request_hash"],
         receipt["policy_digest"],
         receipt["pcr0"],
         receipt["payload_hash"],
@@ -141,17 +143,17 @@ def hash_transcript(path: Path) -> tuple[str, dict[str, object], bytes, str]:
                 signature = data.get("signature")
                 if not isinstance(receipt, dict) or not isinstance(signature, str):
                     raise ValueError("proxy_audit payload missing receipt or signature")
-                for field in ("request_id", "tenant_id", "payload_hash", "policy_digest", "pcr0", "tuple_digest", "timestamp"):
+                for field in ("request_id", "tenant_id", "upstream_url", "request_hash", "payload_hash", "policy_digest", "pcr0", "tuple_digest", "timestamp"):
                     if field not in receipt:
                         raise ValueError(f"receipt missing required field: {field}")
-                for field in ("request_id", "tenant_id", "payload_hash", "policy_digest", "pcr0", "tuple_digest"):
+                for field in ("request_id", "tenant_id", "upstream_url", "request_hash", "payload_hash", "policy_digest", "pcr0", "tuple_digest"):
                     if not isinstance(receipt[field], str) or not receipt[field]:
                         raise ValueError(f"receipt field must be a non-empty string: {field}")
                 if not isinstance(receipt["timestamp"], int) or receipt["timestamp"] < 0:
                     raise ValueError("receipt timestamp must be a non-negative integer")
-                for field in ("payload_hash", "policy_digest"):
+                for field in ("request_hash", "payload_hash", "policy_digest"):
                     value = receipt[field]
-                    if len(value) != 64:
+                    if field != "request_hash" and len(value) != 64:
                         raise ValueError(f"receipt field must be a 32-byte hexadecimal digest: {field}")
                     try:
                         bytes.fromhex(value)
