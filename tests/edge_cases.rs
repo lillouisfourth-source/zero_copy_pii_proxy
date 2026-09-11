@@ -26,6 +26,10 @@ fn metrics_handle() -> Arc<metrics_exporter_prometheus::PrometheusHandle> {
 }
 
 async fn start_proxy(upstream_url: String) -> (String, String, tokio::task::JoinHandle<()>) {
+    std::env::set_var(
+        "MOCK_PCR0",
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    );
     let vault = Arc::new(arc_swap::ArcSwap::from_pointee(PiiVault::new(
         &["password"],
         &["[REDACTED]"],
