@@ -9,6 +9,10 @@ use zero_copy_pii_proxy::{make_metrics_router, make_router, AppState};
 
 #[tokio::test]
 async fn drop_guard_prevents_leak_of_active_sse_streams() {
+    std::env::set_var(
+        "MOCK_PCR0",
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    );
     // Install a fresh prometheus recorder for this test process
     let recorder = PrometheusBuilder::new().build();
     let handle = recorder.handle();

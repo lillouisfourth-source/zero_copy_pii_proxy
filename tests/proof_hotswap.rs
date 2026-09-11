@@ -35,6 +35,10 @@ async fn upstream_handler(State(state): State<UpstreamState>) -> Response<Body> 
 
 #[tokio::test]
 async fn active_streams_keep_their_engine_snapshot_during_hot_swap() {
+    std::env::set_var(
+        "MOCK_PCR0",
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    );
     let (release_first, release_rx) = oneshot::channel::<()>();
     let request_count = Arc::new(AtomicUsize::new(0));
     let upstream_state = (request_count, Arc::new(Mutex::new(Some(release_rx))));
