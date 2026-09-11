@@ -173,9 +173,8 @@ async fn rejects_payloads_larger_than_two_megabytes() {
         .send()
         .await;
 
-    match response {
-        Ok(response) => assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE),
-        Err(_) => {}
+    if let Ok(response) = response {
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
     proxy_task.abort();
 }

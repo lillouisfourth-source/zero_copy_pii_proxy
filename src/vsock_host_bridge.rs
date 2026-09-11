@@ -2,17 +2,12 @@
 
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
 use tokio_vsock::{VsockListener, VsockStream};
 
 const VMADDR_CID_ANY: u32 = 0xffff_ffff;
 const MAX_CONNECT_HEADERS: usize = 4096;
 
-pub async fn run_host_vsock_relay(
-    vsock_port: u32,
-    target_host: &str,
-    target_port: u16,
-) -> Result<(), String> {
+pub async fn run_host_vsock_relay(vsock_port: u32, target_host: &str) -> Result<(), String> {
     let mut listener = VsockListener::bind(VMADDR_CID_ANY, vsock_port)
         .map_err(|error| format!("failed to bind VSOCK port {vsock_port}: {error}"))?;
     let target_host = target_host.to_string();
@@ -34,25 +29,16 @@ pub async fn run_host_vsock_relay(
         }
         let target_host = target_host.clone();
         tokio::spawn(async move {
-            if target_port == 443 {
-                let result = tokio::time::timeout(
-                    Duration::from_secs(3),
-                    relay_connect_connection(vsock, &target_host),
-                )
-                .await;
-                if let Err(error) = match result {
-                    Ok(result) => result,
-                    Err(_) => Err("KMS CONNECT handshake timed out".to_string()),
-                } {
-                    tracing::warn!(%error, "KMS VSOCK relay connection rejected");
-                }
-            } else {
-                let Ok(mut tcp) = TcpStream::connect((target_host.as_str(), target_port)).await
-                else {
-                    return;
-                };
-                let mut vsock = vsock;
-                let _ = tokio::io::copy_bidirectional(&mut vsock, &mut tcp).await;
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                relay_connect_connection(vsock, &target_host),
+            )
+            .await;
+            if let Err(error) = match result {
+                Ok(result) => result,
+                Err(_) => Err("KMS CONNECT handshake timed out".to_string()),
+            } {
+                tracing::warn!(%error, "KMS VSOCK relay connection rejected");
             }
         });
     }
@@ -166,15 +152,9 @@ fn validate_kms_host(authority: &str) -> Result<(), String> {
 pub async fn start_host_daemon() {
     let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
     tokio::spawn(async move {
-        if let Err(error) =
-            run_host_vsock_relay(8000, &format!("kms.{region}.amazonaws.com"), 443).await
+        if let Err(error) = run_host_vsock_relay(8000, &format!("kms.{region}.amazonaws.com")).await
         {
             tracing::error!(%error, "KMS host relay stopped");
-        }
-    });
-    tokio::spawn(async {
-        if let Err(error) = run_host_vsock_relay(8001, "169.254.169.254", 80).await {
-            tracing::error!(%error, "IMDS host relay stopped");
         }
     });
 }

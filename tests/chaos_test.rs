@@ -50,7 +50,6 @@ async fn slowloris_split_chunk_pii_attack() {
     for connection_id in 0..1000 {
         let global_memory = global_memory.clone();
         let tenant_budgets = tenant_budgets.clone();
-        let attack_duration = attack_duration;
 
         let handle = tokio::spawn(async move {
             // Each attacker holds a connection open and sends data very slowly
@@ -79,7 +78,7 @@ async fn slowloris_split_chunk_pii_attack() {
                 ssn_payload
             );
 
-            for (_idx, byte) in full_payload.as_bytes().iter().enumerate() {
+            for byte in full_payload.as_bytes().iter() {
                 if start.elapsed() > attack_duration {
                     break;
                 }

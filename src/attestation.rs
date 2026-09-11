@@ -50,7 +50,8 @@ pub async fn attestation_document(
     {
         let public_key = public_key.to_vec();
         let nonce = nonce.unwrap_or_default();
-        let pcr0 = std::env::var("MOCK_PCR0").unwrap_or_else(|_| "00".repeat(48));
+        let pcr0 =
+            std::env::var("MOCK_PCR0").expect("CRITICAL: MOCK_PCR0 must be set for attestation.");
         let document = ciborium::Value::Map(vec![
             (
                 ciborium::Value::Text("format".into()),
