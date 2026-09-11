@@ -5,6 +5,7 @@ use axum::routing::post;
 use axum::Router;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use reqwest::Client;
+use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
 use zero_copy_pii_proxy::engine::PiiVault;
@@ -111,10 +112,11 @@ async fn propagates_upstream_429_body_retry_after_and_metrics() {
     let response = post_proxy(&client, &proxy_url).await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(response.headers()["retry-after"], "17");
-    assert_eq!(
-        response.text().await.expect("error body"),
-        r#"{"error":"upstream_request_failed","redacted":true}"#
-    );
+    let body: Value = response.json().await.expect("terminal receipt body");
+    assert_eq!(body["error"], "upstream_request_failed");
+    assert_eq!(body["redacted"], true);
+    assert!(body["receipt"]["tuple_digest"].as_str().is_some());
+    assert!(body["signature"].as_str().is_some());
 
     let metrics = client
         .get(format!("{metrics_url}/metrics"))

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tokio_vsock::{VsockListener, VsockStream};
 
 const VMADDR_CID_ANY: u32 = 0xffff_ffff;
@@ -117,17 +118,7 @@ where
     Ok(authority.to_string())
 }
 
-fn allowed_kms_host() -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
-    args.windows(2)
-        .find(|values| values[0] == "--allowed-kms-host")
-        .map(|values| values[1].clone())
-}
-
 fn validate_kms_host(authority: &str) -> Result<(), String> {
-    if allowed_kms_host().as_deref() == Some(authority) {
-        return Ok(());
-    }
     let Some((host, port)) = authority.rsplit_once(':') else {
         return Err("KMS CONNECT authority must include port 443".to_string());
     };

@@ -526,6 +526,11 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         }
     };
     let request_hash = blake3::hash(&request_body).to_hex().to_string();
+    let private_key = state.proxy_private_key.clone();
+    let receipt_policy_digest = state.engine_state.load_full().policy_digest();
+    let receipt_pcr0 = std::env::var("PCR0_HASH")
+        .or_else(|_| std::env::var("MOCK_PCR0"))
+        .expect("CRITICAL: PCR0_HASH or MOCK_PCR0 environment variable must be set. System failing closed to preserve cryptographic integrity.");
     let stream_permit = match UPSTREAM_STREAM_LIMIT.acquire().await {
         Ok(permit) => permit,
         Err(_) => {
@@ -597,7 +602,39 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         let status = StatusCode::from_u16(upstream_response.status().as_u16())
             .unwrap_or(StatusCode::BAD_GATEWAY);
         let retry_after = upstream_response.headers().get("retry-after").cloned();
-        let body = Bytes::from_static(br#"{"error":"upstream_request_failed","redacted":true}"#);
+        let payload_hash = blake3::hash(b"TERMINAL_ERROR").to_hex().to_string();
+        let tuple_digest_hash = canonical_receipt_digest(
+            &request_id,
+            &tenant_id_hex,
+            &state.upstream_url,
+            &request_hash,
+            &receipt_policy_digest,
+            &receipt_pcr0,
+            &payload_hash,
+        );
+        let receipt = AttestedReceipt {
+            request_id: request_id.clone(),
+            tenant_id: tenant_id_hex.clone(),
+            upstream_url: state.upstream_url.clone(),
+            request_hash: request_hash.clone(),
+            payload_hash,
+            policy_digest: receipt_policy_digest.clone(),
+            pcr0: receipt_pcr0.clone(),
+            tuple_digest: tuple_digest_hash.to_hex().to_string(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        let signature = B64Std.encode(private_key.sign(tuple_digest_hash.as_bytes()).to_bytes());
+        let terminal_body = serde_json::json!({
+            "error": "upstream_request_failed",
+            "redacted": true,
+            "receipt": receipt,
+            "signature": signature,
+        });
+        let terminal_body =
+            serde_json::to_vec(&terminal_body).expect("terminal receipt should serialize");
         let status_label = status.as_u16().to_string();
         metrics::increment_counter!(
             "upstream_error_total",
@@ -611,9 +648,9 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
             .header("content-type", "application/json")
             .header(
                 "x-redaction-digest",
-                blake3::hash(body.as_ref()).to_hex().to_string(),
+                blake3::hash(&terminal_body).to_hex().to_string(),
             )
-            .body(Body::from(body))
+            .body(Body::from(terminal_body))
             .unwrap();
     }
 
@@ -633,17 +670,12 @@ pub async fn proxy_with_upstream(req: Request<Body>, state: AppState) -> Respons
         state.global_memory.clone(),
         OUTPUT_BYTE_BUDGET,
     );
-    let private_key = state.proxy_private_key.clone();
     let receipt_request_id = request_id.clone();
     let receipt_tenant_id = tenant_id_hex;
     let receipt_upstream_url = state.upstream_url.clone();
     let receipt_request_hash = request_hash;
     let mut stream_shutdown = state.shutdown.clone();
     let active_engine_state = state.engine_state.load_full();
-    let receipt_policy_digest = active_engine_state.policy_digest();
-    let receipt_pcr0 = std::env::var("PCR0_HASH")
-        .or_else(|_| std::env::var("MOCK_PCR0"))
-        .expect("CRITICAL: PCR0_HASH or MOCK_PCR0 environment variable must be set. System failing closed to preserve cryptographic integrity.");
     tokio::spawn(async move {
         struct ActiveStreamGuard {
             active_sse: bool,

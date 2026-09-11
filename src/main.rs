@@ -35,6 +35,10 @@ use zero_copy_pii_proxy::{active_sse_streams, make_metrics_router, make_router, 
 async fn main() {
     dotenv().ok();
 
+    let _pcr0_identity = std::env::var("PCR0_HASH")
+        .or_else(|_| std::env::var("MOCK_PCR0"))
+        .expect("CRITICAL: PCR0_HASH or MOCK_PCR0 environment variable must be set. System failing closed to preserve cryptographic integrity.");
+
     tracing_subscriber::fmt::init();
 
     let recorder = PrometheusBuilder::new().build();
