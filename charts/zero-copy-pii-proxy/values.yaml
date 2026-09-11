@@ -11,6 +11,11 @@ service:
 
 terminationGracePeriodSeconds: 120
 
+enclave:
+  enabled: false
+  deviceResource: "aws.amazon.com/nitro-enclaves"
+  hugepages1Gi: "1Gi"
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 10001

@@ -64,6 +64,10 @@ spec:
               value: {{ .Values.config.mockPcr0 | quote }}
             {{- end }}
           volumeMounts:
+            {{- if .Values.enclave.enabled }}
+            - name: nitro-enclaves
+              mountPath: /dev/nitro_enclaves
+            {{- end }}
             {{- if .Values.config.piiConfigMap }}
             - name: pii-config
               mountPath: /etc/zero-copy-pii-proxy
@@ -83,7 +87,20 @@ spec:
             - name: metrics
               containerPort: 9090
           resources:
+            {{- if .Values.enclave.enabled }}
+            requests:
+              cpu: {{ .Values.resources.requests.cpu | quote }}
+              memory: {{ .Values.resources.requests.memory | quote }}
+              hugepages-1Gi: {{ .Values.enclave.hugepages1Gi | quote }}
+              {{ .Values.enclave.deviceResource }}: "1"
+            limits:
+              cpu: {{ .Values.resources.limits.cpu | quote }}
+              memory: {{ .Values.resources.limits.memory | quote }}
+              hugepages-1Gi: {{ .Values.enclave.hugepages1Gi | quote }}
+              {{ .Values.enclave.deviceResource }}: "1"
+            {{- else }}
             {{- toYaml .Values.resources | nindent 12 }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -97,6 +114,12 @@ spec:
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
       volumes:
+        {{- if .Values.enclave.enabled }}
+        - name: nitro-enclaves
+          hostPath:
+            path: /dev/nitro_enclaves
+            type: CharDevice
+        {{- end }}
         {{- if .Values.config.piiConfigMap }}
         - name: pii-config
           configMap:

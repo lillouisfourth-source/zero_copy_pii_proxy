@@ -14,6 +14,16 @@ variable "region" {
   description = "AWS region for the EKS node group."
 }
 
+variable "account_id" {
+  type        = string
+  description = "AWS account ID retaining KMS administrative access."
+}
+
+variable "enclave_role_arn" {
+  type        = string
+  description = "Full IAM role ARN allowed to request attested KMS decrypts."
+}
+
 variable "name" {
   type        = string
   description = "Name prefix for the launch template."
@@ -68,9 +78,9 @@ data "aws_caller_identity" "current" {}
 
 locals {
   kms_trust_policy = templatefile("${path.module}/../../deploy/kms_trust_policy.json.tpl", {
-    account_id        = data.aws_caller_identity.current.account_id
-    enclave_role_name = var.enclave_role_name
-    pcr0_hash         = var.pcr0_hash
+    account_id       = var.account_id
+    enclave_role_arn = var.enclave_role_arn
+    pcr0_hash        = var.pcr0_hash
   })
 }
 
