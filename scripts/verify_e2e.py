@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the proxy and verify redaction, BLAKE3, and Ed25519 end to end."""
 
-# Dependencies: python -m pip install blake3 cbor2 cryptography
+# Dependencies: python -m pip install blake3 cbor2 cryptography pycose
 
 from __future__ import annotations
 
@@ -20,21 +20,61 @@ from verify_receipt import canonical_receipt_digest, decode_bytes, extract_attes
 import blake3
 import cbor2
 from pycose.messages import Sign1Message
+from pycose.keys import EC2Key
+from pycose.keys.curves import P256, P384, P521
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
-def verify_attestation_nonce(document: bytes, client_nonce: bytes) -> None:
+def verify_attestation_nonce(document: bytes, client_nonce: bytes, expected_pcr0: str) -> None:
     decoded = cbor2.loads(document)
     if isinstance(decoded, dict) and decoded.get("format") == "local-mock-not-nitro":
         returned_nonce = decoded.get("nonce")
-    else:
-        cose_msg = Sign1Message.decode(document)
-        payload = cbor2.loads(cose_msg.payload)
-        returned_nonce = payload.get("nonce")
+        returned_pcr0 = decoded.get("pcr0")
+        assert returned_nonce == client_nonce, (
+            "CRITICAL: Attestation nonce mismatch. "
+            "Replay attack detected or stale hardware state."
+        )
+        assert returned_pcr0 == expected_pcr0, "CRITICAL: Mock PCR0 mismatch."
+        return
+
+    cose_msg = Sign1Message.decode(document)
+    payload = cbor2.loads(cose_msg.payload)
+    cert_der = payload.get("certificate")
+    if not isinstance(cert_der, bytes):
+        raise ValueError("CRITICAL: Nitro attestation certificate is missing")
+    cert = x509.load_der_x509_certificate(cert_der, default_backend())
+    public_key = cert.public_key()
+    if not isinstance(public_key, ec.EllipticCurvePublicKey):
+        raise ValueError("CRITICAL: Nitro attestation certificate key is not elliptic curve")
+    numbers = public_key.public_numbers()
+    curve_map = {
+        "secp256r1": P256,
+        "secp384r1": P384,
+        "secp521r1": P521,
+    }
+    cose_curve = curve_map.get(public_key.curve.name)
+    if cose_curve is None:
+        raise ValueError(f"CRITICAL: unsupported Nitro certificate curve: {public_key.curve.name}")
+    coordinate_size = (public_key.curve.key_size + 7) // 8
+    cose_msg.key = EC2Key(
+        crv=cose_curve,
+        x=numbers.x.to_bytes(coordinate_size, "big"),
+        y=numbers.y.to_bytes(coordinate_size, "big"),
+    )
+    if not cose_msg.verify_signature():
+        raise ValueError("CRITICAL: Nitro COSE_Sign1 signature verification failed")
+    returned_nonce = payload.get("nonce")
+    pcrs = payload.get("pcrs")
+    returned_pcr0 = pcrs.get(0) if isinstance(pcrs, dict) else None
     assert returned_nonce == client_nonce, (
         "CRITICAL: Attestation nonce mismatch. "
         "Replay attack detected or stale hardware state."
     )
+    if not isinstance(returned_pcr0, bytes) or returned_pcr0.hex() != expected_pcr0:
+        raise ValueError("CRITICAL: Nitro attestation PCR0 mismatch")
 
 
 def main() -> int:
@@ -49,7 +89,7 @@ def main() -> int:
     attestation_url = f"{args.attestation_url}?{urlencode({'nonce': nonce})}"
     with urllib.request.urlopen(attestation_url, timeout=30) as attestation_response:
         attestation_document = decode_bytes(attestation_response.read().decode("ascii"))
-    verify_attestation_nonce(attestation_document, bytes.fromhex(nonce))
+    verify_attestation_nonce(attestation_document, bytes.fromhex(nonce), args.expected_pcr0.lower())
     public_key = extract_attested_identity(attestation_document, args.expected_pcr0.lower(), None)
 
     body = json.dumps({
