@@ -4421,6 +4421,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "mimalloc",
  "notify",
+ "once_cell",
  "proptest",
  "rand 0.8.7",
  "rcgen",

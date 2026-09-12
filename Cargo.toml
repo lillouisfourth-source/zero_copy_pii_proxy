@@ -55,6 +55,7 @@ sha2 = { version = "0.10", optional = true }
 rustls = "0.23.44"
 tokio-rustls = "0.26.5"
 rcgen = "0.14.10"
+once_cell = "1.21.4"
 
 [features]
 default = ["dep:base64"]

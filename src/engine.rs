@@ -1,10 +1,35 @@
 use aho_corasick::AhoCorasick;
 use bytes::{Bytes, BytesMut};
+use once_cell::sync::Lazy;
 use serde_json;
 use std::str::Utf8Error;
 use std::sync::Arc;
 
 const DEFAULT_MAX_BUFFER_CAPACITY: usize = 64 * 1024;
+
+static REDACTION_DFA: Lazy<AhoCorasick> = Lazy::new(|| {
+    AhoCorasick::builder()
+        .ascii_case_insensitive(true)
+        .build(["password", "secret", "ssn"])
+        .expect("failed to build default redaction DFA")
+});
+
+fn build_redaction_dfa(patterns: &[String]) -> AhoCorasick {
+    if patterns
+        == [
+            String::from("password"),
+            String::from("secret"),
+            String::from("ssn"),
+        ]
+    {
+        return REDACTION_DFA.clone();
+    }
+    let pattern_refs = patterns.iter().map(String::as_str).collect::<Vec<_>>();
+    AhoCorasick::builder()
+        .ascii_case_insensitive(true)
+        .build(pattern_refs)
+        .expect("failed to build aho-corasick automaton")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputSegment {
@@ -23,10 +48,9 @@ pub struct EngineState {
 
 impl EngineState {
     pub fn new(patterns: &[String], replacements: &[String]) -> Self {
-        let pattern_refs = patterns.iter().map(String::as_str).collect::<Vec<_>>();
         let replacement_strings = replacements.to_vec();
         Self {
-            ac: AhoCorasick::new(&pattern_refs).expect("failed to build aho-corasick automaton"),
+            ac: build_redaction_dfa(patterns),
             max_pattern_len: patterns.iter().map(String::len).max().unwrap_or(0),
             patterns: patterns.to_vec(),
             replacements: replacement_strings
@@ -183,7 +207,11 @@ impl PiiVault {
             replacements.len(),
             "patterns and replacements length mismatch"
         );
-        let searcher = AhoCorasick::new(patterns).expect("failed to build aho-corasick automaton");
+        let pattern_values = patterns
+            .iter()
+            .map(|pattern| (*pattern).to_string())
+            .collect::<Vec<_>>();
+        let searcher = build_redaction_dfa(&pattern_values);
         let replacement_strings = replacements
             .iter()
             .map(|value| (*value).to_string())
@@ -305,6 +333,14 @@ mod tests {
         assert_eq!(
             redact_text("my password is secret", &vault()),
             "my [REDACTED] is [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redaction_matches_ascii_case_insensitively() {
+        assert_eq!(
+            redact_text("My PASSWORD is SECRET", &vault()),
+            "My [REDACTED] is [REDACTED]"
         );
     }
 
