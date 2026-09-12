@@ -69,5 +69,6 @@ networkPolicy:
 
 secrets:
   authTokens: "replace-me"
+  kmsCiphertext: ""
   adminBearerToken: "replace-me-admin"
   mockKmsCiphertext: ""

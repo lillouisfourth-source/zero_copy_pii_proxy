@@ -27,6 +27,7 @@ use zero_copy_pii_proxy::attestation::LocalMockProvider;
 #[cfg(feature = "nitro")]
 use zero_copy_pii_proxy::attestation::NitroKmsProvider;
 use zero_copy_pii_proxy::attestation::{attestation_document, decrypt_upstream_api_key};
+use zero_copy_pii_proxy::bootloader::load_proxy_auth_token;
 use zero_copy_pii_proxy::engine::{EngineState, PiiVault};
 use zero_copy_pii_proxy::{active_sse_streams, make_metrics_router, make_router, AppState};
 
@@ -103,11 +104,29 @@ async fn main() {
         .expect("failed to obtain NSM attestation document"),
     );
 
-    let auth_file = std::env::var("PROXY_AUTH_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be configured"));
-    let mut auth_source = std::fs::read_to_string(&auth_file)
-        .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be readable"));
+    let nitro_auth_token = if std::env::var("NITRO_ENV").is_ok() {
+        Some(
+            load_proxy_auth_token()
+                .await
+                .expect("failed to unseal PROXY_AUTH_TOKEN with NSM/KMS"),
+        )
+    } else {
+        None
+    };
+    let auth_file = nitro_auth_token.is_none().then(|| {
+        std::env::var("PROXY_AUTH_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be configured"))
+    });
+    let mut auth_source = if let Some(token) = nitro_auth_token.as_deref() {
+        token.as_str().to_owned()
+    } else {
+        let auth_file = auth_file
+            .as_ref()
+            .expect("local auth file path must exist outside Nitro mode");
+        std::fs::read_to_string(auth_file)
+            .unwrap_or_else(|_| panic!("PROXY_AUTH_FILE must be readable"))
+    };
     let auth_keyring = Arc::new(ArcSwap::new(Arc::new(hash_keyring(&auth_source))));
     auth_source.zeroize();
     let mut admin_bearer_token = std::env::var("ADMIN_BEARER_TOKEN")
@@ -126,12 +145,13 @@ async fn main() {
             watch_pii_config(&watch_path, watch_vault, watch_engine_state);
         });
     }
-    let watch_keyring = auth_keyring.clone();
-    let watch_auth_path = auth_file.clone();
-    let watch_tenant_budgets = tenant_budgets.clone();
-    tokio::task::spawn_blocking(move || {
-        watch_auth_file(&watch_auth_path, watch_keyring, watch_tenant_budgets)
-    });
+    if let Some(watch_auth_path) = auth_file.clone() {
+        let watch_keyring = auth_keyring.clone();
+        let watch_tenant_budgets = tenant_budgets.clone();
+        tokio::task::spawn_blocking(move || {
+            watch_auth_file(&watch_auth_path, watch_keyring, watch_tenant_budgets)
+        });
+    }
 
     let metrics_app = make_metrics_router(prometheus_handle.clone());
     let app = make_router(AppState {

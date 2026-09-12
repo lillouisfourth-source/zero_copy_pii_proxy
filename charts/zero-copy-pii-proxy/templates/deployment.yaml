@@ -59,6 +59,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
                   key: ADMIN_BEARER_TOKEN
+            {{- if .Values.secrets.kmsCiphertext }}
+            - name: PROXY_AUTH_TOKEN_CIPHERTEXT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "zero-copy-pii-proxy.fullname" . }}-secrets
+                  key: PROXY_AUTH_TOKEN_CIPHERTEXT
+            {{- end }}
             {{- if .Values.config.mockPcr0 }}
             - name: MOCK_PCR0
               value: {{ .Values.config.mockPcr0 | quote }}

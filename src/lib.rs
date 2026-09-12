@@ -1,6 +1,7 @@
 #![deny(warnings)]
 
 pub mod attestation;
+pub mod bootloader;
 pub mod budget_queue;
 pub mod domain;
 pub mod engine;
