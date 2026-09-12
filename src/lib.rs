@@ -5,6 +5,7 @@ pub mod bootloader;
 pub mod budget_queue;
 pub mod domain;
 pub mod engine;
+pub mod tls;
 #[cfg(feature = "nitro")]
 pub mod vsock_bridge;
 #[cfg(feature = "host-bridge")]

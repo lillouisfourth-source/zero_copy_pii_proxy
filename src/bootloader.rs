@@ -7,6 +7,8 @@ use base64::Engine;
 #[cfg(feature = "nitro")]
 use rsa::pkcs8::EncodePublicKey;
 #[cfg(feature = "nitro")]
+use secrecy::ExposeSecret;
+#[cfg(feature = "nitro")]
 use secrecy::SecretString;
 
 pub async fn load_proxy_auth_token() -> Result<Arc<String>, String> {

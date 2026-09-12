@@ -29,6 +29,7 @@ use zero_copy_pii_proxy::attestation::NitroKmsProvider;
 use zero_copy_pii_proxy::attestation::{attestation_document, decrypt_upstream_api_key};
 use zero_copy_pii_proxy::bootloader::load_proxy_auth_token;
 use zero_copy_pii_proxy::engine::{EngineState, PiiVault};
+use zero_copy_pii_proxy::tls::{build_tls_acceptor, TlsListener};
 use zero_copy_pii_proxy::{active_sse_streams, make_metrics_router, make_router, AppState};
 
 #[deny(warnings)]
@@ -213,13 +214,25 @@ async fn main() {
             .expect("metrics server failed");
     });
 
-    axum::serve(listener, svc)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown.changed().await;
-            tracing::info!("shutdown signal received; draining active connections");
-        })
-        .await
-        .unwrap();
+    if std::env::var("NITRO_ENV").is_ok() {
+        let tls_acceptor = build_tls_acceptor();
+        let tls_listener = TlsListener::new(listener, tls_acceptor);
+        axum::serve(tls_listener, svc)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown.changed().await;
+                tracing::info!("shutdown signal received; draining active TLS connections");
+            })
+            .await
+            .unwrap();
+    } else {
+        axum::serve(listener, svc)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown.changed().await;
+                tracing::info!("shutdown signal received; draining active connections");
+            })
+            .await
+            .unwrap();
+    }
 }
 
 async fn build_upstream_client() -> Client {

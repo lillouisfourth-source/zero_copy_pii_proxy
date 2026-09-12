@@ -1,6 +1,7 @@
 name: Nitro Enclave Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -64,7 +65,7 @@ jobs:
       - name: Upload deterministic EIF artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: enclave-measurements
+          name: pcr0-artifact
           path: |
             enclave_run1.eif
             enclave_run2.eif
